@@ -113,34 +113,30 @@ cd aws-api-mcp-server-for-amazon-quick
 
 ### 步骤 2：安装依赖
 
-**关键：`agentcore` CLI 和项目运行时依赖要装在不同的环境里。**
-
-`bedrock-agentcore-starter-toolkit`（提供 `agentcore` 命令）是本地部署工具，不属于项目运行时依赖，也不会被打进容器。如果装进项目 venv，随后执行 `uv sync --frozen` 会把它清掉（因为 `pyproject.toml` 里没声明它）。
-
-#### 2a. 全局安装 `agentcore` CLI
-
-推荐用 `uv tool install` 或 `pipx`，它们会把 CLI 装到独立的隔离环境：
+需要两个东西：**项目 venv**（给 `agentcore configure` 解析入口文件、给步骤 3 本地测试用）和 **`agentcore` CLI**（本地部署工具）。两者要装在不同的环境里——`agentcore` CLI 不属于项目运行时依赖，不能进项目 venv，否则随后任何一次 `uv sync --frozen` 都会把它清掉。
 
 ```bash
-# 选项一：uv tool（如果你已经装了 uv）
-uv tool install bedrock-agentcore-starter-toolkit
+# 1) 确保有 Python 3.13 和 uv
+python3.13 --version   # 没有就先装 Python 3.13
+pip install --user uv  # 已装过可跳过
 
-# 选项二：pipx
-pipx install bedrock-agentcore-starter-toolkit
-
-agentcore --help
-```
-
-#### 2b.（可选）为本地测试准备项目 venv
-
-**只有你打算按步骤 3 在本地跑一次 MCP Server 时才需要这一步。**
-如果你直接用 `agentcore configure / launch` 部署到 AgentCore Runtime，**跳过 2b 即可**——AgentCore 会在容器里自己装依赖。
-
-```bash
+# 2) 创建项目 venv 并安装运行时依赖
 uv sync --frozen --no-dev
+# 等价于创建 .venv + 按 uv.lock 安装；激活：
+source .venv/bin/activate
+
+# 3) 在独立环境里安装 agentcore CLI（不要装进上面这个 venv）
+#    二选一：
+uv tool install bedrock-agentcore-starter-toolkit   # 选项 A：uv tool
+# 或
+pipx install bedrock-agentcore-starter-toolkit      # 选项 B：pipx
+
+# 4) 验证
+agentcore --help
+uv run awslabs.aws-api-mcp-server --help   # 验证项目 venv 可运行
 ```
 
-这会在当前目录创建 `.venv` 并按 `uv.lock` 装好项目依赖。后续 `uv run awslabs.aws-api-mcp-server` 会用这个 venv。
+如果后续在项目 venv 里不小心 `pip install bedrock-agentcore-starter-toolkit` 或 `uv add` 了它，下次 `uv sync --frozen` 会把它移除——这不是 bug，是 `--frozen` 的预期行为。保持它在 `uv tool` / `pipx` 的独立环境里即可。
 
 ### 步骤 3：本地测试（可选）
 
