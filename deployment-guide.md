@@ -62,7 +62,7 @@ aws-api-mcp-server (ARM64 容器)
 
 ## 2. 前置条件
 
-- Python 3.10+、git、jq
+- Python 3.13（与项目 Dockerfile 和 `uv.lock` 锁定版本一致；`pyproject.toml` 理论上支持 `>=3.10`，但其他版本可能在 `uv sync --frozen` 时触发锁文件重建）、git、jq
 - AWS CLI v2 已配置凭证（可访问源账号）
 - Amazon Quick Suite Enterprise 订阅，用户具有 Author Pro 角色
 
