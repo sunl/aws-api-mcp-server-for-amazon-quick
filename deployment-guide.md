@@ -116,27 +116,29 @@ cd aws-api-mcp-server-for-amazon-quick
 需要两个东西：**项目 venv**（给 `agentcore configure` 解析入口文件、给步骤 3 本地测试用）和 **`agentcore` CLI**（本地部署工具）。两者要装在不同的环境里——`agentcore` CLI 不属于项目运行时依赖，不能进项目 venv，否则随后任何一次 `uv sync --frozen` 都会把它清掉。
 
 ```bash
-# 1) 确保有 Python 3.13 和 uv
-python3.13 --version   # 没有就先装 Python 3.13
-pip install --user uv  # 已装过可跳过
+# 1) 安装 uv（已装过可跳过）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# 新开 shell 或手动加载 PATH：
+source ~/.bashrc   # 或 source ~/.zshrc，取决于你的 shell
 
-# 2) 创建项目 venv 并安装运行时依赖
+# 2) 用 uv 安装 Python 3.13（无需 root，不影响系统 Python）
+uv python install 3.13
+python3.13 --version
+
+# 3) 创建项目 venv 并安装运行时依赖
 uv sync --frozen --no-dev
 # 等价于创建 .venv + 按 uv.lock 安装；激活：
 source .venv/bin/activate
 
-# 3) 在独立环境里安装 agentcore CLI（不要装进上面这个 venv）
-#    二选一：
-uv tool install bedrock-agentcore-starter-toolkit   # 选项 A：uv tool
-# 或
-pipx install bedrock-agentcore-starter-toolkit      # 选项 B：pipx
+# 4) 在独立环境里安装 agentcore CLI（不要装进上面这个 venv）
+uv tool install bedrock-agentcore-starter-toolkit
 
-# 4) 验证
+# 5) 验证
 agentcore --help
 uv run awslabs.aws-api-mcp-server --help   # 验证项目 venv 可运行
 ```
 
-如果后续在项目 venv 里不小心 `pip install bedrock-agentcore-starter-toolkit` 或 `uv add` 了它，下次 `uv sync --frozen` 会把它移除——这不是 bug，是 `--frozen` 的预期行为。保持它在 `uv tool` / `pipx` 的独立环境里即可。
+如果后续在项目 venv 里不小心 `pip install bedrock-agentcore-starter-toolkit` 或 `uv add` 了它，下次 `uv sync --frozen` 会把它移除——这不是 bug，是 `--frozen` 的预期行为。保持它在 `uv tool` 的独立环境里即可。
 
 ### 步骤 3：本地测试（可选）
 
