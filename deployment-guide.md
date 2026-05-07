@@ -267,7 +267,7 @@ echo "Execution Role ARN: ${EXECUTION_ROLE_ARN}"
 ### 步骤 7：创建 User Pool 和测试用户
 
 ```bash
-export POOL_NAME="AwsApiMcpPool"
+export POOL_NAME="<YOUR_POOL_NAME>"
 
 export POOL_ID=$(aws cognito-idp create-user-pool \
   --pool-name "${POOL_NAME}" \
@@ -281,8 +281,8 @@ export CLIENT_ID=$(aws cognito-idp create-user-pool-client \
   --explicit-auth-flows "ALLOW_USER_PASSWORD_AUTH" "ALLOW_REFRESH_TOKEN_AUTH" \
   --region ${AWS_REGION} | jq -r '.UserPoolClient.ClientId')
 
-export COGNITO_USERNAME="testuser"
-export COGNITO_PASSWORD="<设置一个强密码>"
+export COGNITO_USERNAME="<YOUR_USERNAME>"
+export COGNITO_PASSWORD="<YOUR_SECURE_PASSWORD>"
 
 aws cognito-idp admin-create-user \
   --user-pool-id ${POOL_ID} --username ${COGNITO_USERNAME} \
@@ -300,7 +300,7 @@ echo "Client ID:     ${CLIENT_ID}"
 ### 步骤 8：创建 Cognito Domain
 
 ```bash
-export COGNITO_DOMAIN_PREFIX="aws-api-mcp-$(echo ${AWS_ACCOUNT_ID} | tail -c 9)"
+export COGNITO_DOMAIN_PREFIX="api-mcp-$(echo ${AWS_ACCOUNT_ID} | tail -c 9)"
 
 aws cognito-idp create-user-pool-domain \
   --user-pool-id ${POOL_ID} \
@@ -349,7 +349,7 @@ echo "M2M Client Secret: ${QS_M2M_CLIENT_SECRET}"
 
 如果你希望通过 `target_account_id` 参数查询**其他账号**的 AWS 数据，需要在源账号和每个目标账号上分别配置 IAM。不需要跨账号查询可跳过本节。设计原理参见 [cross-account-support.md](./cross-account-support.md)。
 
-默认角色名为 `AwsApiMcpCrossAccountRole`。如需自定义，部署时通过环境变量 `CROSS_ACCOUNT_ROLE_NAME` 覆盖，并同步替换本节的角色名。
+默认角色名为 `AwsApiMcpCrossAccountRole`。如需自定义，部署时通过 `--env CROSS_ACCOUNT_ROLE_NAME=YourCustomRoleName` 传入（见步骤 14），并同步替换本节的角色名。
 
 ### 步骤 11：给源账号执行角色添加 AssumeRole 权限
 
@@ -444,39 +444,46 @@ authorizer_configuration:
     allowedClients:
     - <步骤7的CLIENT_ID>
     - <步骤10的QS_M2M_CLIENT_ID>   # Quick Suite 用它；不加会导致 Quick Suite 连不上
-
-# 容器运行时环境变量——部署前必须补全
-environment_variables:
-  AWS_REGION: us-east-1
-  AWS_API_MCP_TRANSPORT: streamable-http
-  AWS_API_MCP_HOST: 0.0.0.0
-  AWS_API_MCP_PORT: "8000"
-  AWS_API_MCP_ALLOWED_HOSTS: "*"
-  AWS_API_MCP_ALLOWED_ORIGINS: "*"
-  AWS_API_MCP_STATELESS_HTTP: "true"
-  AUTH_TYPE: no-auth                   # 官方硬性要求：容器内不做入站认证
-  READ_OPERATIONS_ONLY: "true"         # 强烈建议开启
-  # 跨账号相关（仅当第 6 节完成时才有意义）
-  # CROSS_ACCOUNT_ROLE_NAME: AwsApiMcpCrossAccountRole  # 非默认名才需要设
 ```
 
-**关键字段说明（全部必需，除非注明）：**
+> **⚠️ 环境变量不要写在 `.bedrock_agentcore.yaml` 里。** Starter Toolkit 的 Pydantic schema 中没有 `environment_variables` 字段，写了会被静默忽略。环境变量必须在 `agentcore deploy` 时通过 `--env` 参数传入（见步骤 14）。
+
+**容器运行时环境变量说明（全部必需，除非注明）：**
+
+以下环境变量将在步骤 14 通过 `agentcore deploy --env` 传入 AgentCore Runtime：
 
 - `AWS_REGION` —— MCP Server 启动时校验此变量必须存在。AgentCore 平台通常会自动把部署所在区域注入到容器，但为了避免平台行为变化导致启动失败，**建议显式设置**。
-- `AWS_API_MCP_TRANSPORT: streamable-http` —— 默认 `stdio`，不改 AgentCore 连不上。
-- `AWS_API_MCP_HOST: 0.0.0.0` —— 默认 `127.0.0.1`，不改会导致 AgentCore 无法连接容器内的服务。
-- `AWS_API_MCP_PORT: "8000"` —— AgentCore 默认把流量转发到容器 8000 端口。
-- `AWS_API_MCP_ALLOWED_HOSTS / ALLOWED_ORIGINS: "*"` —— AgentCore 代理请求时的 Host header 不可预测；默认的严格校验会拒绝所有请求。安全由 AgentCore 入站认证和 IAM 保证。
-- `AWS_API_MCP_STATELESS_HTTP: "true"` —— AgentCore 已在平台层做会话隔离；容器内不需要再维护 session。
-- `AUTH_TYPE: no-auth` —— **官方硬性要求**。入站认证由 AgentCore Runtime 的 JWT Authorizer 统一处理（就是 `.bedrock_agentcore.yaml` 里 `customJWTAuthorizer` + `allowedClients` 那段）。若设为 `oauth`，容器内的 FastMCP 会再做一次 JWT 校验，与 AgentCore 层冲突导致请求被拒。
-- `READ_OPERATIONS_ONLY: "true"` —— 即使执行角色挂的是 `ReadOnlyAccess`，再加一层代码级白名单更稳妥。生产环境如需写操作再设为 `false`。
+- `AWS_API_MCP_TRANSPORT=streamable-http` —— 默认 `stdio`，不改 AgentCore 连不上。
+- `AWS_API_MCP_HOST=0.0.0.0` —— 默认 `127.0.0.1`，不改会导致 AgentCore 无法连接容器内的服务。
+- `AWS_API_MCP_PORT=8000` —— AgentCore 默认把流量转发到容器 8000 端口。
+- `AWS_API_MCP_ALLOWED_HOSTS=*` / `AWS_API_MCP_ALLOWED_ORIGINS=*` —— AgentCore 代理请求时的 Host header 不可预测；默认的严格校验会拒绝所有请求。安全由 AgentCore 入站认证和 IAM 保证。
+- `AWS_API_MCP_STATELESS_HTTP=true` —— AgentCore 已在平台层做会话隔离；容器内不需要再维护 session。
+- `AUTH_TYPE=no-auth` —— **官方硬性要求**。入站认证由 AgentCore Runtime 的 JWT Authorizer 统一处理（就是 `.bedrock_agentcore.yaml` 里 `customJWTAuthorizer` + `allowedClients` 那段）。若设为 `oauth`，容器内的 FastMCP 会再做一次 JWT 校验，与 AgentCore 层冲突导致请求被拒。
+- `READ_OPERATIONS_ONLY=true` —— 即使执行角色挂的是 `ReadOnlyAccess`，再加一层代码级白名单更稳妥。生产环境如需写操作再设为 `false`。
+- `CROSS_ACCOUNT_ROLE_NAME=AwsApiMcpCrossAccountRole` ——（可选）仅当第 6 节完成且使用非默认角色名时才需要设。
 
 > **关于 Dockerfile**：仓库自带 `Dockerfile`，`agentcore configure` 默认会自己生成一个。如果你想用仓库自带的 Dockerfile（已经配好 uv + Python 3.13 + 合适的 entrypoint），在 `.bedrock_agentcore.yaml` 中手动加 `container_runtime: use_existing_dockerfile: true` 或直接让它自动生成——两种都能跑起来。如果 Starter Toolkit 提示缺 `requirements.txt`，执行一下 `uv pip compile pyproject.toml -o requirements.txt` 生成一份兼容的依赖清单即可。
 
 ### 步骤 14：部署
 
+> **注意**：`agentcore launch` 是旧命令名，现已被 `agentcore deploy` 替代（功能相同）。
+
 ```bash
-agentcore launch
+agentcore deploy \
+  --env AWS_REGION=us-east-1 \
+  --env AWS_API_MCP_TRANSPORT=streamable-http \
+  --env AWS_API_MCP_HOST=0.0.0.0 \
+  --env AWS_API_MCP_PORT=8000 \
+  --env "AWS_API_MCP_ALLOWED_HOSTS=*" \
+  --env "AWS_API_MCP_ALLOWED_ORIGINS=*" \
+  --env AWS_API_MCP_STATELESS_HTTP=true \
+  --env AUTH_TYPE=no-auth \
+  --env READ_OPERATIONS_ONLY=true
+```
+
+如果第 6 节配置了跨账号且使用非默认角色名，追加：
+```bash
+  --env CROSS_ACCOUNT_ROLE_NAME=YourCustomRoleName
 ```
 
 构建 + 推送 ECR + 创建 Runtime 大约需 5–10 分钟。完成后记录输出的 Agent ARN：
@@ -594,12 +601,23 @@ aws logs tail /aws/bedrock-agentcore/runtimes/<你的 agent-id>-DEFAULT \
 # 停止当前测试会话
 agentcore stop-session
 
-# 修改源码后重新部署
-agentcore launch
+# 修改源码后重新部署（需要带上所有 --env 参数）
+agentcore deploy \
+  --env AWS_REGION=us-east-1 \
+  --env AWS_API_MCP_TRANSPORT=streamable-http \
+  --env AWS_API_MCP_HOST=0.0.0.0 \
+  --env AWS_API_MCP_PORT=8000 \
+  --env "AWS_API_MCP_ALLOWED_HOSTS=*" \
+  --env "AWS_API_MCP_ALLOWED_ORIGINS=*" \
+  --env AWS_API_MCP_STATELESS_HTTP=true \
+  --env AUTH_TYPE=no-auth \
+  --env READ_OPERATIONS_ONLY=true
 
 # 完全清理（会删除 Runtime，但保留 ECR 镜像）
 agentcore destroy
 ```
+
+> **提示**：每次 `agentcore deploy` 都需要带上完整的 `--env` 参数，环境变量不会从上次部署中继承。建议把部署命令保存为 shell 脚本方便复用。
 
 ---
 
@@ -607,13 +625,13 @@ agentcore destroy
 
 | 现象 | 原因与解决 |
 |------|-----------|
-| Quick Suite "Creation failed"、只出现 `listTools` 失败 | AgentCore `allowedClients` 未包含 M2M Client ID。编辑 `.bedrock_agentcore.yaml` 添加后 `agentcore launch` |
+| Quick Suite "Creation failed"、只出现 `listTools` 失败 | AgentCore `allowedClients` 未包含 M2M Client ID。编辑 `.bedrock_agentcore.yaml` 添加后重新 `agentcore deploy --env ...` |
 | Cognito 返回 `invalid_scope` | Resource Server 未创建或 scope 名不一致，核对步骤 9 与步骤 10 的 `aws-api-mcp/invoke` |
-| 容器启动即失败，日志 `AWS_REGION environment variable is not defined` | `.bedrock_agentcore.yaml` 的 `environment_variables` 里没配 `AWS_REGION` |
+| 容器启动即失败，日志 `AWS_REGION environment variable is not defined` | `agentcore deploy` 时漏了 `--env AWS_REGION=us-east-1`，重新部署并补上 |
 | 容器内 MCP Server 只监听 127.0.0.1 | 忘了设 `AWS_API_MCP_HOST=0.0.0.0` |
 | 400 Bad Request `Invalid host / origin` | `AWS_API_MCP_ALLOWED_HOSTS` / `AWS_API_MCP_ALLOWED_ORIGINS` 没设 `*` |
 | 401 Unauthorized | Bearer Token 过期（1h），重新获取；或 AgentCore 的 `allowedClients` 没列该 client_id |
-| 所有请求都 401 / auth 报错，且确认 Token 正确 | 很可能误把 `AUTH_TYPE` 设成了 `oauth`。改回 `no-auth` 并重新 `agentcore launch` |
+| 所有请求都 401 / auth 报错，且确认 Token 正确 | 很可能误把 `AUTH_TYPE` 设成了 `oauth`。重新 `agentcore deploy` 时确保 `--env AUTH_TYPE=no-auth` |
 | 403 AccessDenied（call_aws 执行时） | 执行角色缺对应 AWS API 权限；或启用了 `READ_OPERATIONS_ONLY` 而命令是写操作 |
 | 跨账号调用报 `Failed to assume role ...` | 目标账号未创建 `AwsApiMcpCrossAccountRole`，或信任策略不允许源执行角色，或源角色没有 `sts:AssumeRole` 权限 |
 | curl 测试返回 400 / 406 | `Accept` header 必须同时带 `application/json, text/event-stream` |
