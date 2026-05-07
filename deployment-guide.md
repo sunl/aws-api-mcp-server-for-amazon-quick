@@ -37,7 +37,7 @@ aws-api-mcp-server (ARM64 容器)
 | 传输协议 | `streamable-http`（`AWS_API_MCP_TRANSPORT=streamable-http`） |
 | 监听地址 | `0.0.0.0:8000`（由 `AWS_API_MCP_HOST` / `AWS_API_MCP_PORT` 控制） |
 | HTTP Host/Origin 校验 | AgentCore 会代理请求，需放开 `AWS_API_MCP_ALLOWED_HOSTS=*` 与 `AWS_API_MCP_ALLOWED_ORIGINS=*` |
-| 容器架构 | ARM64（AWS Graviton），由 AgentCore Starter Toolkit 自动构建 |
+| 容器架构 | ARM64（AWS Graviton），由 AgentCore CLI 基于本仓库 Dockerfile 自动构建 |
 | 认证方式 | AgentCore 平台层做 OAuth 2.0 JWT 校验（Cognito）；容器内 MCP Server 必须 `AUTH_TYPE=no-auth`（官方硬性要求） |
 | 会话模式 | `AWS_API_MCP_STATELESS_HTTP=true`（AgentCore 已在平台层提供会话隔离） |
 | Quick Suite 认证 | Service authentication (2LO)，需将 Quick Suite 的 M2M Client ID 加入 AgentCore `allowedClients` |
@@ -45,6 +45,8 @@ aws-api-mcp-server (ARM64 容器)
 > **关于 `AUTH_TYPE=no-auth`**：参见仓库 `DEPLOYMENT.md` 的 "Understanding AWS API Authentication on AgentCore" 一节。AgentCore 在 Runtime 层集中做入站认证，容器内的 MCP Server 接收的请求已经由 AgentCore 验证过。此 MCP Server **不支持**容器内的入站认证；设成 `oauth` 会因与 AgentCore 的 auth 层重复或 header 不匹配而失败。安全由 AgentCore JWT Authorizer + IAM 执行角色权限这两层共同保证。
 
 > 参考文档：
+> - [AgentCore CLI GitHub](https://github.com/aws/agentcore-cli)
+> - [Get started with the AgentCore CLI](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-cli.html)
 > - [Deploy MCP servers in AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-mcp.html)
 > - [MCP protocol contract](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-mcp-protocol-contract.html)
 > - [Amazon Quick Suite MCP integration](https://docs.aws.amazon.com/quick/latest/userguide/mcp-integration.html)
@@ -53,24 +55,47 @@ aws-api-mcp-server (ARM64 容器)
 
 | 方式 | 镜像来源 | 部署工具 | 适用场景 |
 |------|---------|---------|----------|
-| **A. 本地构建**（本文档使用） | 你自己的代码 + AgentCore 自动构建 | `agentcore` CLI（Starter Toolkit） | 你改过源码（例如加了跨账号支持），或想跟进上游最新代码 |
+| **A. 本地构建**（本文档使用） | 你自己的代码 + AgentCore CLI 自动构建 | `@aws/agentcore` CLI | 你改过源码（例如加了跨账号支持），或想跟进上游最新代码 |
 | B. Marketplace 预构建镜像 | `709825985650.dkr.ecr.us-east-1.amazonaws.com/amazon-web-services/aws-api-mcp-server` | `aws bedrock-agentcore-control create-agent-runtime` 原始 API | 使用上游未修改版，图省事 |
 
 由于本项目加了跨账号支持（参见 [cross-account-support.md](./cross-account-support.md)），**只能走方式 A**。官方上游 `DEPLOYMENT.md` 对应方式 B，可作为交叉参考，但环境变量、IAM 权限等配置要求两种方式是一致的。
 
 ---
 
-## 2. 前置条件
+## 2. 前置条件与工具安装
 
-- Python 3.13（与项目 Dockerfile 和 `uv.lock` 锁定版本一致；`pyproject.toml` 理论上支持 `>=3.10`，但其他版本可能在 `uv sync --frozen` 时触发锁文件重建）、git、jq
+### 前置条件
+
+- Python 3.10+（与项目 Dockerfile 和 `uv.lock` 锁定版本一致；`pyproject.toml` 理论上支持 `>=3.10`，但其他版本可能在 `uv sync --frozen` 时触发锁文件重建）
+- git、jq
 - AWS CLI v2 已配置凭证（可访问源账号）
 - Amazon Quick Suite Enterprise 订阅，用户具有 Author Pro 角色
 
+### 步骤 1：安装 Node.js、Python、uv 和 AgentCore CLI
+
+> **注意**：AgentCore CLI 已从旧版 Python 包 `bedrock-agentcore-starter-toolkit` 迁移到新版 npm 包 `@aws/agentcore`。新版命令行是 `agentcore create` + `agentcore deploy`，取代了旧版的 `agentcore configure` + `agentcore launch`；项目配置文件也从 `.bedrock_agentcore.yaml` 迁移到 `agentcore/agentcore.json`。
+> 如果之前装过旧版 CLI，请先卸载：`pip uninstall bedrock-agentcore-starter-toolkit` 或 `uv tool uninstall bedrock-agentcore-starter-toolkit`。
+
 ```bash
-aws sts get-caller-identity
-export AWS_REGION=us-east-1
-export AWS_DEFAULT_REGION=us-east-1
-export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+# 安装 Node.js 22（使用 nvm）
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+source ~/.bashrc
+nvm install 22
+nvm use 22
+node --version
+
+# 安装 uv（Python 包管理器，本项目用它管理依赖和 venv）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc
+uv --version
+
+# 用 uv 安装 Python 3.14（无需 root，不影响系统 Python）
+uv python install 3.14
+python3.14 --version
+
+# 安装新版 AgentCore CLI（npm 包）
+npm install -g @aws/agentcore
+agentcore --help
 ```
 
 ---
@@ -102,73 +127,60 @@ export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output tex
 
 ---
 
-## 3. 获取源码并安装依赖
+## 3. 获取源码
 
-### 步骤 1：克隆源码
+### 步骤 2：克隆源码
 
 ```bash
 git clone https://github.com/sunl/aws-api-mcp-server-for-amazon-quick.git
-cd aws-api-mcp-server-for-amazon-quick
 ```
-
-### 步骤 2：安装依赖
-
-需要两个东西：**项目 venv**（给 `agentcore configure` 解析入口文件、给步骤 3 本地测试用）和 **`agentcore` CLI**（本地部署工具）。两者要装在不同的环境里——`agentcore` CLI 不属于项目运行时依赖，不能进项目 venv，否则随后任何一次 `uv sync --frozen` 都会把它清掉。
-
-```bash
-# 1) 安装 uv（已装过可跳过）
-curl -LsSf https://astral.sh/uv/install.sh | sh
-# 新开 shell 或手动加载 PATH：
-source ~/.bashrc   # 或 source ~/.zshrc，取决于你的 shell
-
-# 2) 用 uv 安装 Python 3.13（无需 root，不影响系统 Python）
-uv python install 3.13
-python3.13 --version
-
-# 3) 创建项目 venv 并安装运行时依赖
-uv sync --frozen --no-dev
-# 等价于创建 .venv + 按 uv.lock 安装；激活：
-source .venv/bin/activate
-
-# 4) 在独立环境里安装 agentcore CLI（不要装进上面这个 venv）
-uv tool install bedrock-agentcore-starter-toolkit
-
-# 5) 验证
-agentcore --help
-uv run awslabs.aws-api-mcp-server --help   # 验证项目 venv 可运行
-```
-
-如果后续在项目 venv 里不小心 `pip install bedrock-agentcore-starter-toolkit` 或 `uv add` 了它，下次 `uv sync --frozen` 会把它移除——这不是 bug，是 `--frozen` 的预期行为。保持它在 `uv tool` 的独立环境里即可。
 
 ### 步骤 3：本地测试（可选）
 
+如果需要在部署前验证 MCP Server 能正常启动：
+
 ```bash
+cd aws-api-mcp-server-for-amazon-quick
+
+# 按 uv.lock 创建项目 venv 并安装运行时依赖
+uv sync --frozen --no-dev
+source .venv/bin/activate
+
+# 启动 MCP Server
 AWS_API_MCP_TRANSPORT=streamable-http \
 AUTH_TYPE=no-auth \
 AWS_API_MCP_HOST=127.0.0.1 \
 AWS_API_MCP_PORT=8000 \
 AWS_REGION=${AWS_REGION} \
   uv run awslabs.aws-api-mcp-server
-```
 
-新开终端验证 MCP initialize：
-
-```bash
+# 新开终端，发送 MCP initialize 请求验证
 curl -sS -X POST http://127.0.0.1:8000/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
 ```
 
-预期返回包含 `serverInfo` 和 `call_aws`、`suggest_aws_commands` 两个工具的 JSON 响应。
-
-> 注意：MCP 协议要求 `Accept` header 同时包含 `application/json` 和 `text/event-stream`。
+预期返回
+```
+event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"experimental":{},"prompts":{"listChanged":true},"resources":{"subscribe":false,"listChanged":true},"tools":{"listChanged":true},"extensions":{"io.modelcontextprotocol/ui":{}}},"serverInfo":{"name":"AWS-API-MCP","version":"3.0.1"}}}
+```
 
 ---
 
 ## 4. 配置 IAM 执行角色
 
-本节创建 AgentCore 容器运行时使用的执行角色。**跨账号查询的额外配置请在第 6 节处理**。
+本节创建 AgentCore 容器运行时使用的执行角色。**跨账号查询的额外配置请在第 6 节处理**。先设置后续步骤需要的环境变量：
+
+```bash
+# 验证 AWS 凭证是否已正确配置
+aws sts get-caller-identity
+
+export AWS_REGION=us-east-1
+export AWS_DEFAULT_REGION=us-east-1
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+```
 
 ### 步骤 4：创建信任策略和角色
 
@@ -222,7 +234,7 @@ aws iam put-role-policy \
 
 ### 步骤 6：添加 AWS API 查询权限（**最关键的一步**）
 
-与 billing MCP 只需要固定几类 API 不同，`call_aws` 工具是通用 AWS CLI 执行器，**能调什么 API 完全取决于你给执行角色的权限**。官方 `DEPLOYMENT.md` 明确警告：**绝不要挂 `AdministratorAccess`**。
+与只需要固定几类 API 的 billing 类 MCP 不同，`call_aws` 工具是通用 AWS CLI 执行器，**能调什么 API 完全取决于你给执行角色的权限**。官方 `DEPLOYMENT.md` 明确警告：**绝不要挂 `AdministratorAccess`**。
 
 **选项 A（推荐起步）：挂 `ReadOnlyAccess`**
 
@@ -267,7 +279,7 @@ echo "Execution Role ARN: ${EXECUTION_ROLE_ARN}"
 ### 步骤 7：创建 User Pool 和测试用户
 
 ```bash
-export POOL_NAME="<YOUR_POOL_NAME>"
+export POOL_NAME="agentcore-api-mcp-pool"
 
 export POOL_ID=$(aws cognito-idp create-user-pool \
   --pool-name "${POOL_NAME}" \
@@ -349,7 +361,7 @@ echo "M2M Client Secret: ${QS_M2M_CLIENT_SECRET}"
 
 如果你希望通过 `target_account_id` 参数查询**其他账号**的 AWS 数据，需要在源账号和每个目标账号上分别配置 IAM。不需要跨账号查询可跳过本节。设计原理参见 [cross-account-support.md](./cross-account-support.md)。
 
-默认角色名为 `AwsApiMcpCrossAccountRole`。如需自定义，部署时通过 `--env CROSS_ACCOUNT_ROLE_NAME=YourCustomRoleName` 传入（见步骤 14），并同步替换本节的角色名。
+默认角色名为 `AwsApiMcpCrossAccountRole`。如需自定义，部署时通过 `CROSS_ACCOUNT_ROLE_NAME` 环境变量覆盖（见步骤 13 的 `envVars`），并同步替换本节的角色名。
 
 ### 步骤 11：给源账号执行角色添加 AssumeRole 权限
 
@@ -408,49 +420,124 @@ aws iam attach-role-policy \
 
 ## 7. 配置并部署到 AgentCore Runtime
 
-### 步骤 13：运行 agentcore configure
+> **注意**：新版 AgentCore CLI（`@aws/agentcore`）使用 `agentcore create` 创建项目、`agentcore deploy` 部署，取代了旧版的 `agentcore configure` + `agentcore launch` 工作流。配置文件也从 `.bedrock_agentcore.yaml` 迁移到 `agentcore/agentcore.json`。详见 [AgentCore CLI GitHub](https://github.com/aws/agentcore-cli) 和 [官方文档](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-cli.html)。
+
+### 步骤 13：初始化 AgentCore 项目并放入源码
+
+使用 `agentcore create` 创建项目脚手架：
 
 ```bash
-agentcore configure -e awslabs/aws_api_mcp_server/server.py --protocol MCP
+# 如果当前在 aws-api-mcp-server-for-amazon-quick 目录则先回到上一级目录
+cd ..
+
+agentcore create --project-name awsapi --name mcpserver --protocol MCP --build Container
+cd awsapi
 ```
 
-交互式引导会在项目根目录生成 `.bedrock_agentcore.yaml`。按下表填写：
+该命令会创建项目目录 `awsapi/`，结构如下：
 
-| 提示项 | 输入内容 | 说明 |
-|--------|---------|------|
-| Agent name | `aws_api_mcp_server` | AgentCore 中的 agent 标识名 |
-| Dependency file | 直接回车（工具会识别 `pyproject.toml` / `uv.lock`；若提示无法识别，参考下方"关于 Dockerfile"说明） | |
-| Execution role ARN | `${EXECUTION_ROLE_ARN}` 的实际值 | 步骤 4 创建的角色 ARN |
-| ECR repository | 直接回车（留空） | 工具会自动创建 |
-| OAuth | `yes` | 启用 AgentCore 入站认证 |
-| Discovery URL | `${DISCOVERY_URL}` 的实际值 | 步骤 7 输出 |
-| Client ID | `${CLIENT_ID},${QS_M2M_CLIENT_ID}` 用逗号连接 | 步骤 7 的测试用 client 和步骤 10 的 M2M client 都要加入 |
-| Memory Configuration | `s` 跳过 | 本 MCP 无状态，不需要 AgentCore Memory |
-
-完成后 `.bedrock_agentcore.yaml` 类似：
-
-```yaml
-default_agent: aws_api_mcp_server
-
-entry_point: awslabs/aws_api_mcp_server/server.py
-execution_role: arn:aws:iam::123456789012:role/AwsApiMcpServerAgentCoreRole
-ecr_repository: 123456789012.dkr.ecr.us-east-1.amazonaws.com/bedrock-agentcore-aws_api_mcp_server
-protocol_configuration:
-  server_protocol: MCP
-
-authorizer_configuration:
-  customJWTAuthorizer:
-    discoveryUrl: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_XXXXXXX/.well-known/openid-configuration
-    allowedClients:
-    - <步骤7的CLIENT_ID>
-    - <步骤10的QS_M2M_CLIENT_ID>   # Quick Suite 用它；不加会导致 Quick Suite 连不上
+```
+awsapi/
+  AGENTS.md
+  README.md
+  agentcore/
+    agentcore.json        # 项目和 agent 配置
+    aws-targets.json      # AWS 账号和区域目标
+    .env.local            # 本地环境变量（已 gitignore）
+  app/
+    mcpserver/
+      Dockerfile
+      README.md
+      main.py             # 脚手架生成的入口文件（将被替换）
+      pyproject.toml      # Python 依赖
+      uv.lock
 ```
 
-> **⚠️ 环境变量不要写在 `.bedrock_agentcore.yaml` 里。** Starter Toolkit 的 Pydantic schema 中没有 `environment_variables` 字段，写了会被静默忽略。环境变量必须在 `agentcore deploy` 时通过 `--env` 参数传入（见步骤 14）。
+将 MCP Server 源码放入 `app/mcpserver/`（即 `codeLocation` 指向的目录）：
+
+```bash
+# 清理脚手架生成的默认文件
+rm -rf app/mcpserver/*
+
+# 将 MCP Server 源码完整复制进来（排除 .git 和 .venv）
+rsync -av --exclude='.git' --exclude='.venv' \
+  ../aws-api-mcp-server-for-amazon-quick/ \
+  app/mcpserver/
+```
+
+最终 `app/mcpserver/` 目录结构应为：
+
+```
+app/mcpserver/
+  awslabs/
+    aws_api_mcp_server/
+      server.py
+      ...
+  Dockerfile
+  docker-healthcheck.sh
+  pyproject.toml
+  uv.lock
+  uv-requirements.txt
+```
+
+编辑 `agentcore/agentcore.json`，在自动生成的配置基础上添加 `executionRoleArn`、`authorizerConfiguration` 以及 `envVars`。以下是需要修改的关键字段（其余字段保持默认即可）：
+
+```json
+{
+  "$schema": "https://schema.agentcore.aws.dev/v1/agentcore.json",
+  "name": "awsapi",
+  "version": 1,
+  "runtimes": [
+    {
+      "name": "mcpserver",
+      "build": "Container",
+      "entrypoint": "awslabs/aws_api_mcp_server/server.py",
+      "codeLocation": "app/mcpserver/",
+      "dockerfile": "Dockerfile",
+      "runtimeVersion": "PYTHON_3_14",
+      "networkMode": "PUBLIC",
+      "instrumentation": {
+        "enableOtel": false
+      },
+      "protocol": "MCP",
+      "executionRoleArn": "<粘贴 ${EXECUTION_ROLE_ARN} 的实际值>",
+      "authorizerType": "CUSTOM_JWT",
+      "authorizerConfiguration": {
+        "customJwtAuthorizer": {
+          "discoveryUrl": "<粘贴 ${DISCOVERY_URL} 的实际值>",
+          "allowedClients": [
+            "<步骤 7 创建的 CLIENT_ID，测试用>",
+            "<步骤 10 创建的 QS_M2M_CLIENT_ID，Quick Suite 必须加入>"
+          ]
+        }
+      },
+      "envVars": [
+        { "name": "AWS_REGION", "value": "us-east-1" },
+        { "name": "AWS_API_MCP_TRANSPORT", "value": "streamable-http" },
+        { "name": "AWS_API_MCP_HOST", "value": "0.0.0.0" },
+        { "name": "AWS_API_MCP_PORT", "value": "8000" },
+        { "name": "AWS_API_MCP_ALLOWED_HOSTS", "value": "*" },
+        { "name": "AWS_API_MCP_ALLOWED_ORIGINS", "value": "*" },
+        { "name": "AWS_API_MCP_STATELESS_HTTP", "value": "true" },
+        { "name": "AUTH_TYPE", "value": "no-auth" },
+        { "name": "READ_OPERATIONS_ONLY", "value": "true" }
+      ]
+    }
+  ]
+}
+```
+
+> **说明**：以上仅列出需要关注的字段，`agentcore create` 自动生成的其他字段（`managedBy`、`tags`、`memories`、`credentials` 等）保持原样不动。
+>
+> **关于 Dockerfile**：本仓库自带的 `Dockerfile` 已经配好 uv + Python 3.13 + 合适的 entrypoint，上面将 `dockerfile` 指向 `Dockerfile` 即可直接使用。`runtimeVersion: PYTHON_3_13` 与 Dockerfile 中的 `uv sync --python 3.13` 保持一致。
+>
+> **重要**：`allowedClients` 必须同时包含步骤 7 创建的测试用 Client ID 和步骤 10 创建的 M2M Client ID。Quick Suite 使用 M2M Client ID 获取 token，如果该 ID 不在允许列表中，连接时会被拒绝。
+>
+> 如果 `agentcore create` 因任何原因失败或需要重新配置，可以直接手动创建或编辑 `agentcore/agentcore.json` 文件。
 
 **容器运行时环境变量说明（全部必需，除非注明）：**
 
-以下环境变量将在步骤 14 通过 `agentcore deploy --env` 传入 AgentCore Runtime：
+上面 `envVars` 数组中每个变量的含义：
 
 - `AWS_REGION` —— MCP Server 启动时校验此变量必须存在。AgentCore 平台通常会自动把部署所在区域注入到容器，但为了避免平台行为变化导致启动失败，**建议显式设置**。
 - `AWS_API_MCP_TRANSPORT=streamable-http` —— 默认 `stdio`，不改 AgentCore 连不上。
@@ -458,38 +545,60 @@ authorizer_configuration:
 - `AWS_API_MCP_PORT=8000` —— AgentCore 默认把流量转发到容器 8000 端口。
 - `AWS_API_MCP_ALLOWED_HOSTS=*` / `AWS_API_MCP_ALLOWED_ORIGINS=*` —— AgentCore 代理请求时的 Host header 不可预测；默认的严格校验会拒绝所有请求。安全由 AgentCore 入站认证和 IAM 保证。
 - `AWS_API_MCP_STATELESS_HTTP=true` —— AgentCore 已在平台层做会话隔离；容器内不需要再维护 session。
-- `AUTH_TYPE=no-auth` —— **官方硬性要求**。入站认证由 AgentCore Runtime 的 JWT Authorizer 统一处理（就是 `.bedrock_agentcore.yaml` 里 `customJWTAuthorizer` + `allowedClients` 那段）。若设为 `oauth`，容器内的 FastMCP 会再做一次 JWT 校验，与 AgentCore 层冲突导致请求被拒。
+- `AUTH_TYPE=no-auth` —— **官方硬性要求**。入站认证由 AgentCore Runtime 的 JWT Authorizer 统一处理（就是 `agentcore.json` 中 `customJwtAuthorizer` + `allowedClients` 那段）。若设为 `oauth`，容器内的 FastMCP 会再做一次 JWT 校验，与 AgentCore 层冲突导致请求被拒。
 - `READ_OPERATIONS_ONLY=true` —— 即使执行角色挂的是 `ReadOnlyAccess`，再加一层代码级白名单更稳妥。生产环境如需写操作再设为 `false`。
-- `CROSS_ACCOUNT_ROLE_NAME=AwsApiMcpCrossAccountRole` ——（可选）仅当第 6 节完成且使用非默认角色名时才需要设。
+- （可选）`CROSS_ACCOUNT_ROLE_NAME=AwsApiMcpCrossAccountRole` —— 仅当第 6 节使用了非默认角色名时才需要追加到 `envVars` 数组。
 
-> **关于 Dockerfile**：仓库自带 `Dockerfile`，`agentcore configure` 默认会自己生成一个。如果你想用仓库自带的 Dockerfile（已经配好 uv + Python 3.13 + 合适的 entrypoint），在 `.bedrock_agentcore.yaml` 中手动加 `container_runtime: use_existing_dockerfile: true` 或直接让它自动生成——两种都能跑起来。如果 Starter Toolkit 提示缺 `requirements.txt`，执行一下 `uv pip compile pyproject.toml -o requirements.txt` 生成一份兼容的依赖清单即可。
+**确认 `agentcore/aws-targets.json` 的部署目标。** 使用 `-y` 或 `--dry-run` 等非交互模式时，必须配置 target：
+
+```bash
+# 先确认当前账号和区域
+echo "Account: ${AWS_ACCOUNT_ID}"
+echo "Region: ${AWS_REGION}"
+```
+
+然后编辑 `agentcore/aws-targets.json`，将空数组替换为：
+
+```json
+[
+  {
+    "name": "default",
+    "account": "<你的 AWS_ACCOUNT_ID>",
+    "region": "<你的 AWS_REGION>"
+  }
+]
+```
+
+> 交互模式下（直接运行 `agentcore deploy` 不带参数），CLI 会自动检测当前 AWS 凭证的账号和区域，可以不配置此文件。
 
 ### 步骤 14：部署
 
-> **注意**：`agentcore launch` 是旧命令名，现已被 `agentcore deploy` 替代（功能相同）。
+使用 `--dry-run` 预览部署变更，如果 CDK 之前没有 bootstrap 过，需要加上 `--yes` 参数（可选）：
 
 ```bash
-agentcore deploy \
-  --env AWS_REGION=us-east-1 \
-  --env AWS_API_MCP_TRANSPORT=streamable-http \
-  --env AWS_API_MCP_HOST=0.0.0.0 \
-  --env AWS_API_MCP_PORT=8000 \
-  --env "AWS_API_MCP_ALLOWED_HOSTS=*" \
-  --env "AWS_API_MCP_ALLOWED_ORIGINS=*" \
-  --env AWS_API_MCP_STATELESS_HTTP=true \
-  --env AUTH_TYPE=no-auth \
-  --env READ_OPERATIONS_ONLY=true
+agentcore deploy --dry-run --yes
 ```
 
-如果第 6 节配置了跨账号且使用非默认角色名，追加：
+确认无误后执行部署：
+
 ```bash
-  --env CROSS_ACCOUNT_ROLE_NAME=YourCustomRoleName
+agentcore deploy -y
 ```
 
-构建 + 推送 ECR + 创建 Runtime 大约需 5–10 分钟。完成后记录输出的 Agent ARN：
+`agentcore deploy` 命令会：
+- 读取 `agentcore/agentcore.json` 和 `agentcore/aws-targets.json` 配置
+- 基于本仓库的 `Dockerfile` 构建 ARM64 Docker 镜像并推送到 ECR
+- 使用 AWS CDK 合成并部署 CloudFormation 资源
+- 创建 AgentCore Runtime 并注入 `envVars` 中声明的环境变量
+
+使用 `-v` 查看详细的资源级部署事件。构建 + 推送 ECR + 创建 Runtime 大约需 5–10 分钟。
+
+部署完成后，查看部署状态并记录 Agent ARN：
 
 ```bash
-export AGENT_ARN="<输出的 ARN>"
+agentcore status
+
+export AGENT_ARN="<输出中的 ARN>"
 ```
 
 ### 步骤 15：验证部署
@@ -513,7 +622,11 @@ curl -sS -X POST "${MCP_ENDPOINT}" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
 ```
 
-预期返回 `serverInfo` 和 `call_aws` / `suggest_aws_commands` 两个工具（若开启了 `EXPERIMENTAL_AGENT_SCRIPTS` 会多一个 `get_execution_plan`）。
+预期返回 
+```
+event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"experimental":{},"prompts":{"listChanged":true},"resources":{"subscribe":false,"listChanged":true},"tools":{"listChanged":true},"extensions":{"io.modelcontextprotocol/ui":{}}},"serverInfo":{"name":"AWS-API-MCP","version":"3.0.1"}}}
+```
 
 再用一个查本账号的 `call_aws` 请求验证执行链路：
 
@@ -534,6 +647,10 @@ curl -sS -X POST "${MCP_ENDPOINT}" \
   -H "Authorization: Bearer ${BEARER_TOKEN}" \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"call_aws","arguments":{"cli_command":"aws s3api list-buckets","target_account_id":"<目标账号12位ID>"}}}'
 ```
+
+> 注意：
+> - 必须先发 `initialize` 请求完成 MCP 协议握手，直接发 `tools/list` 会返回错误
+> - Token 有效期默认 1 小时，过期后重新执行获取 Token 的命令
 
 ---
 
@@ -556,26 +673,28 @@ echo "Token URL:       ${TOKEN_URL}"
 echo "========================================="
 ```
 
-### 步骤 17：在 Quick Suite 控制台创建 MCP Actions 集成
+### 步骤 17：在 Quick Suite 控制台创建 MCP Connector 集成
 
 1. 登录 [Amazon Quick Suite 控制台](https://quicksight.aws.amazon.com/)（需 Author Pro）
-2. 左侧导航栏 → Connections → Integrations → Actions
-3. 在 "Model Context Protocol" 卡片上点击 "+"
-4. 填写集成信息：
+2. 左侧导航栏 → **Connectors**
+3. 选择 **Create for your team** 标签页
+4. 找到并选择 **Model Context Protocol (MCP)**
+5. 在 Create Integration 页面填写：
    - Name: 如 `AWS API MCP`
-   - MCP server endpoint: 上面输出的 `MCP_SERVER_ENDPOINT`
-5. Next
-6. 认证方式选 "Service authentication"，填：
+   - Description（可选）: 集成用途描述
+   - MCP server endpoint: 步骤 16 输出的 `MCP_SERVER_ENDPOINT`
+6. 点击 "Next"
+7. 认证方式选择 **Service authentication**，填写：
    - Client ID: `${QS_M2M_CLIENT_ID}`
    - Client Secret: `${QS_M2M_CLIENT_SECRET}`
    - Token URL: `${TOKEN_URL}`
-7. "Create and continue"
-8. 等待工具发现完成（约 1–2 分钟），确认能看到 `call_aws` / `suggest_aws_commands` 这 2 个 Actions
-9. Next → 可选共享 → Done
+8. 点击 "Create and continue"
+9. 等待工具发现完成（约 1–2 分钟），确认能看到 `call_aws` / `suggest_aws_commands` 这 2 个 Actions
+10. 先不共享给其他用户，点击 "Publish"
 
 ### 步骤 18：在 Chat Agent 中使用
 
-打开 Chat Agents，选择 "My Assistant" 或自定义 Agent，输入：
+打开 Chat Agents，选择 "My Assistant" 或创建 Custom Chat Agent 并绑定 AWS API MCP，输入：
 
 ```
 列出 us-east-1 所有运行中的 EC2 实例
@@ -593,31 +712,31 @@ echo "========================================="
 ## 9. 日常运维
 
 ```bash
-# 查看运行时日志
+# 查看部署状态
+agentcore status
+
+# 流式查看 agent 运行日志
+agentcore logs
+
+# 也可以直接使用 AWS CLI 查看日志
 aws logs tail /aws/bedrock-agentcore/runtimes/<你的 agent-id>-DEFAULT \
   --log-stream-name-prefix "$(date +%Y/%m/%d)/[runtime-logs]" \
   --since 1h --region ${AWS_REGION}
 
-# 停止当前测试会话
-agentcore stop-session
+# 查看最近的 traces
+agentcore traces list
 
-# 修改源码后重新部署（需要带上所有 --env 参数）
-agentcore deploy \
-  --env AWS_REGION=us-east-1 \
-  --env AWS_API_MCP_TRANSPORT=streamable-http \
-  --env AWS_API_MCP_HOST=0.0.0.0 \
-  --env AWS_API_MCP_PORT=8000 \
-  --env "AWS_API_MCP_ALLOWED_HOSTS=*" \
-  --env "AWS_API_MCP_ALLOWED_ORIGINS=*" \
-  --env AWS_API_MCP_STATELESS_HTTP=true \
-  --env AUTH_TYPE=no-auth \
-  --env READ_OPERATIONS_ONLY=true
+# 修改源码后重新部署（AgentCore 会重新构建容器镜像）
+# 注：envVars 已在 agentcore.json 中持久化，无需每次重新指定
+rsync -av --exclude='.git' --exclude='.venv' \
+  ../aws-api-mcp-server-for-amazon-quick/ \
+  app/mcpserver/
+agentcore deploy -y
 
-# 完全清理（会删除 Runtime，但保留 ECR 镜像）
-agentcore destroy
+# 完全清理：先移除所有资源配置，再部署以销毁 AWS 资源
+agentcore remove all
+agentcore deploy -y
 ```
-
-> **提示**：每次 `agentcore deploy` 都需要带上完整的 `--env` 参数，环境变量不会从上次部署中继承。建议把部署命令保存为 shell 脚本方便复用。
 
 ---
 
@@ -625,18 +744,19 @@ agentcore destroy
 
 | 现象 | 原因与解决 |
 |------|-----------|
-| Quick Suite "Creation failed"、只出现 `listTools` 失败 | AgentCore `allowedClients` 未包含 M2M Client ID。编辑 `.bedrock_agentcore.yaml` 添加后重新 `agentcore deploy --env ...` |
+| Quick Suite "Creation failed"、只出现 `listTools` 失败 | AgentCore `allowedClients` 未包含 M2M Client ID。编辑 `agentcore/agentcore.json` 添加后重新 `agentcore deploy -y` |
 | Cognito 返回 `invalid_scope` | Resource Server 未创建或 scope 名不一致，核对步骤 9 与步骤 10 的 `aws-api-mcp/invoke` |
-| 容器启动即失败，日志 `AWS_REGION environment variable is not defined` | `agentcore deploy` 时漏了 `--env AWS_REGION=us-east-1`，重新部署并补上 |
-| 容器内 MCP Server 只监听 127.0.0.1 | 忘了设 `AWS_API_MCP_HOST=0.0.0.0` |
+| 容器启动即失败，日志 `AWS_REGION environment variable is not defined` | `agentcore.json` 的 `envVars` 中漏配 `AWS_REGION`，补上后重新部署 |
+| 容器内 MCP Server 只监听 127.0.0.1 | `envVars` 中忘了设 `AWS_API_MCP_HOST=0.0.0.0` |
 | 400 Bad Request `Invalid host / origin` | `AWS_API_MCP_ALLOWED_HOSTS` / `AWS_API_MCP_ALLOWED_ORIGINS` 没设 `*` |
 | 401 Unauthorized | Bearer Token 过期（1h），重新获取；或 AgentCore 的 `allowedClients` 没列该 client_id |
-| 所有请求都 401 / auth 报错，且确认 Token 正确 | 很可能误把 `AUTH_TYPE` 设成了 `oauth`。重新 `agentcore deploy` 时确保 `--env AUTH_TYPE=no-auth` |
+| 所有请求都 401 / auth 报错，且确认 Token 正确 | 很可能误把 `AUTH_TYPE` 设成了 `oauth`。改回 `no-auth` 并重新 `agentcore deploy -y` |
 | 403 AccessDenied（call_aws 执行时） | 执行角色缺对应 AWS API 权限；或启用了 `READ_OPERATIONS_ONLY` 而命令是写操作 |
 | 跨账号调用报 `Failed to assume role ...` | 目标账号未创建 `AwsApiMcpCrossAccountRole`，或信任策略不允许源执行角色，或源角色没有 `sts:AssumeRole` 权限 |
 | curl 测试返回 400 / 406 | `Accept` header 必须同时带 `application/json, text/event-stream` |
 | `agentcore invoke` 返回 400 | 正常：该命令跳过了 MCP `initialize` 握手。用 `curl` 先发 `initialize` 验证 |
-| `ModuleNotFoundError: awslabs.aws_api_mcp_server` | 容器内依赖安装不完整；检查 Dockerfile 层（`uv sync --no-editable` 必须成功）或 `requirements.txt` 是否覆盖全部依赖 |
+| AgentCore 部署后修改未生效 | 需要重新将源码 rsync 到 `app/mcpserver/` 并执行 `agentcore deploy -y` 重新构建镜像 |
+| `ModuleNotFoundError: awslabs.aws_api_mcp_server` | 容器内依赖安装不完整；检查 Dockerfile 层（`uv sync --no-editable` 必须成功）或 `uv-requirements.txt` 是否覆盖全部依赖 |
 
 ---
 
@@ -645,6 +765,8 @@ agentcore destroy
 - [aws-api-mcp-server 上游源码](https://github.com/awslabs/mcp/tree/main/src/aws-api-mcp-server)
 - [跨账号查询方案](./cross-account-support.md)
 - [FastMCP 文档](https://github.com/jlowin/fastmcp)
+- [AgentCore CLI GitHub](https://github.com/aws/agentcore-cli)
+- [Get started with the AgentCore CLI](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-cli.html)
 - [Deploy MCP servers in AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-mcp.html)
 - [MCP protocol contract](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-mcp-protocol-contract.html)
 - [IAM Permissions for AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-permissions.html)
