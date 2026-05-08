@@ -1,464 +1,777 @@
-# AWS API MCP Server
+# 部署 AWS API MCP Server 到 AgentCore Runtime 并接入 Quick Suite
 
+## 1. 方案概述
 
-## Overview
-The AWS API MCP Server enables AI assistants to interact with AWS services and resources through AWS CLI commands. It provides programmatic access to manage your AWS infrastructure while maintaining proper security controls.
+### 1.1 目标
 
-This server acts as a bridge between AI assistants and AWS services, allowing you to create, update, and manage AWS resources across all available services. It helps with AWS CLI command selection and provides access to the latest AWS API features and services, even those released after an AI model's knowledge cutoff date.
+部署本仓库（基于 [awslabs/mcp/aws-api-mcp-server](https://github.com/awslabs/mcp/tree/main/src/aws-api-mcp-server) 改造）到 Amazon Bedrock AgentCore Runtime，并通过 Amazon Quick Suite 的 Chat Agent 以 Service Authentication (2LO) 方式调用，使业务用户能够在对话界面中以自然语言执行任意 AWS CLI 命令。
 
+本仓库相对上游新增的跨账号查询支持，详见 [cross-account-support.md](./cross-account-support.md)。
 
-## Prerequisites
-- You must have an AWS account with credentials properly configured. Please refer to the official documentation [here ↗](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/credentials.html#configuring-credentials) for guidance. We recommend configuring your credentials using the `AWS_API_MCP_PROFILE_NAME` environment variable (see [Configuration Options](#%EF%B8%8F-configuration-options) section for details). If `AWS_API_MCP_PROFILE_NAME` is not specified, the system follows boto3's default credential selection order, in this case, if you have multiple AWS profiles configured on your machine, ensure the correct profile is prioritized in your credential chain.
-- Ensure you have Python 3.10 or newer installed. You can download it from the [official Python website](https://www.python.org/downloads/) or use a version manager such as [pyenv](https://github.com/pyenv/pyenv).
-- (Optional) Install [uv](https://docs.astral.sh/uv/getting-started/installation/) for faster dependency management and improved Python environment handling.
+### 1.2 架构
 
-
-## 📦 Installation Methods
-
-Choose the installation method that best fits your workflow and get started with your favorite assistant with MCP support, like Kiro, Cursor, or Cline.
-
-| Cursor | VS Code | Kiro |
-|:------:|:-------:|:----:|
-| [![Install MCP Server](https://cursor.com/deeplink/mcp-install-light.svg)](https://cursor.com/en/install-mcp?name=awslabs.aws-api-mcp-server&config=eyJjb21tYW5kIjoidXZ4IGF3c2xhYnMuYXdzLWFwaS1tY3Atc2VydmVyQGxhdGVzdCIsImVudiI6eyJBV1NfUkVHSU9OIjoidXMtZWFzdC0xIn0sImRpc2FibGVkIjpmYWxzZSwiYXV0b0FwcHJvdmUiOltdfQ%3D%3D) | [![Install on VS Code](https://img.shields.io/badge/Install_on-VS_Code-FF9900?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=AWS%20API%20MCP%20Server&config=%7B%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22awslabs.aws-api-mcp-server%40latest%22%5D%2C%22env%22%3A%7B%22AWS_REGION%22%3A%22us-east-1%22%7D%2C%22type%22%3A%22stdio%22%7D) | [![Add to Kiro](https://kiro.dev/images/add-to-kiro.svg)](https://kiro.dev/launch/mcp/add?name=awslabs.aws-api-mcp-server&config=%7B%22command%22%3A%20%22uvx%22%2C%20%22args%22%3A%20%5B%22awslabs.aws-api-mcp-server%40latest%22%5D%2C%20%22disabled%22%3A%20false%2C%20%22autoApprove%22%3A%20%5B%5D%7D) |
-
-
-
-### ⚡ Using uv
-Add the following configuration to your MCP client config file (e.g., for Kiro, edit `~/.kiro/settings/mcp.json`):
-
-**For Linux/MacOS users:**
-
-```json
-{
-  "mcpServers": {
-    "awslabs.aws-api-mcp-server": {
-      "command": "uvx",
-      "args": [
-        "awslabs.aws-api-mcp-server@latest"
-      ],
-      "env": {
-        "AWS_REGION": "us-east-1"
-      },
-      "disabled": false,
-      "autoApprove": []
-    }
-  }
-}
+```
+Amazon Quick Suite Chat Agent (MCP 客户端)
+        │
+        │  HTTPS (streamable-http + OAuth 2.0 / 2LO client_credentials)
+        ▼
+Amazon Bedrock AgentCore Runtime
+        │
+        │  容器内部 0.0.0.0:8000/mcp
+        ▼
+aws-api-mcp-server (ARM64 容器)
+        │  工具 call_aws
+        │  执行任意 AWS CLI 命令
+        ▼
+源账号 AWS API（默认）
+   │
+   │  可选 sts:AssumeRole (target_account_id)
+   ▼
+目标账号 AWS API（跨账号查询）
 ```
 
-**For Windows users:**
+### 1.3 关键约束
 
-```json
-{
-  "mcpServers": {
-    "awslabs.aws-api-mcp-server": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "awslabs.aws-api-mcp-server@latest",
-        "awslabs.aws-api-mcp-server.exe"
-      ],
-      "env": {
-        "AWS_REGION": "us-east-1"
-      },
-      "disabled": false,
-      "autoApprove": []
-    }
-  }
-}
-```
+| 约束项 | 要求 |
+|--------|------|
+| 传输协议 | `streamable-http`（`AWS_API_MCP_TRANSPORT=streamable-http`） |
+| 监听地址 | `0.0.0.0:8000`（由 `AWS_API_MCP_HOST` / `AWS_API_MCP_PORT` 控制） |
+| HTTP Host/Origin 校验 | AgentCore 会代理请求，需放开 `AWS_API_MCP_ALLOWED_HOSTS=*` 与 `AWS_API_MCP_ALLOWED_ORIGINS=*` |
+| 容器架构 | ARM64（AWS Graviton），由 AgentCore CLI 基于本仓库 Dockerfile 自动构建 |
+| 认证方式 | AgentCore 平台层做 OAuth 2.0 JWT 校验（Cognito）；容器内 MCP Server 必须 `AUTH_TYPE=no-auth`（官方硬性要求） |
+| 会话模式 | `AWS_API_MCP_STATELESS_HTTP=true`（AgentCore 已在平台层提供会话隔离） |
+| Quick Suite 认证 | Service authentication (2LO)，需将 Quick Suite 的 M2M Client ID 加入 AgentCore `allowedClients` |
 
+> **关于 `AUTH_TYPE=no-auth`**：参见仓库 `DEPLOYMENT.md` 的 "Understanding AWS API Authentication on AgentCore" 一节。AgentCore 在 Runtime 层集中做入站认证，容器内的 MCP Server 接收的请求已经由 AgentCore 验证过。此 MCP Server **不支持**容器内的入站认证；设成 `oauth` 会因与 AgentCore 的 auth 层重复或 header 不匹配而失败。安全由 AgentCore JWT Authorizer + IAM 执行角色权限这两层共同保证。
 
+> 参考文档：
+> - [AgentCore CLI GitHub](https://github.com/aws/agentcore-cli)
+> - [Get started with the AgentCore CLI](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-cli.html)
+> - [Deploy MCP servers in AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-mcp.html)
+> - [MCP protocol contract](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-mcp-protocol-contract.html)
+> - [Amazon Quick Suite MCP integration](https://docs.aws.amazon.com/quick/latest/userguide/mcp-integration.html)
 
-### 🐍 Using Python (pip)
-> [!TIP]
-> It's recommended to use a virtual environment because the AWS CLI version of the MCP server might not match the locally installed one
-> and can cause it to be downgraded. In the MCP client config file you can change `"command"` to the path of the python executable in your
-> virtual environment (e.g., `"command": "/workspace/project/.venv/bin/python"`).
+### 1.4 两种部署路径对比
 
-**Step 1: Install the package**
+| 方式 | 镜像来源 | 部署工具 | 适用场景 |
+|------|---------|---------|----------|
+| **A. 本地构建**（本文档使用） | 你自己的代码 + AgentCore CLI 自动构建 | `@aws/agentcore` CLI | 你改过源码（例如加了跨账号支持），或想跟进上游最新代码 |
+| B. Marketplace 预构建镜像 | `709825985650.dkr.ecr.us-east-1.amazonaws.com/amazon-web-services/aws-api-mcp-server` | `aws bedrock-agentcore-control create-agent-runtime` 原始 API | 使用上游未修改版，图省事 |
+
+由于本项目加了跨账号支持（参见 [cross-account-support.md](./cross-account-support.md)），**只能走方式 A**。官方上游 `DEPLOYMENT.md` 对应方式 B，可作为交叉参考，但环境变量、IAM 权限等配置要求两种方式是一致的。
+
+---
+
+## 2. 前置条件与工具安装
+
+### 前置条件
+
+- Python 3.10+（与项目 Dockerfile 和 `uv.lock` 锁定版本一致；`pyproject.toml` 理论上支持 `>=3.10`，但其他版本可能在 `uv sync --frozen` 时触发锁文件重建）
+- git、jq
+- AWS CLI v2 已配置凭证（可访问源账号）
+- Amazon Quick Suite Enterprise 订阅，用户具有 Author Pro 角色
+
+### 步骤 1：安装 Node.js、Python、uv 和 AgentCore CLI
+
+> **注意**：AgentCore CLI 已从旧版 Python 包 `bedrock-agentcore-starter-toolkit` 迁移到新版 npm 包 `@aws/agentcore`。新版命令行是 `agentcore create` + `agentcore deploy`，取代了旧版的 `agentcore configure` + `agentcore launch`；项目配置文件也从 `.bedrock_agentcore.yaml` 迁移到 `agentcore/agentcore.json`。
+> 如果之前装过旧版 CLI，请先卸载：`pip uninstall bedrock-agentcore-starter-toolkit` 或 `uv tool uninstall bedrock-agentcore-starter-toolkit`。
+
 ```bash
-pip install awslabs.aws-api-mcp-server
+# 安装 Node.js 22（使用 nvm）
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+source ~/.bashrc
+nvm install 22
+nvm use 22
+node --version
+
+# 安装 uv（Python 包管理器，本项目用它管理依赖和 venv）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc
+uv --version
+
+# 用 uv 安装 Python 3.14（无需 root，不影响系统 Python）
+uv python install 3.14
+python3.14 --version
+
+# 安装新版 AgentCore CLI（npm 包）
+npm install -g @aws/agentcore
+agentcore --help
 ```
 
-**Step 2: Configure your MCP client**
-Add the following configuration to your MCP client config file (e.g., for Kiro, edit `~/.kiro/settings/mcp.json`):
+设置后续步骤需要的环境变量：
 
-```json
-{
-  "mcpServers": {
-    "awslabs.aws-api-mcp-server": {
-      "command": "python",
-      "args": [
-        "-m",
-        "awslabs.aws_api_mcp_server.server"
-      ],
-      "env": {
-        "AWS_REGION": "us-east-1"
-      },
-      "disabled": false,
-      "autoApprove": []
-    }
-  }
-}
-```
-
-
-
-### 🐳 Using Docker
-
-You can isolate the MCP server by running it in a Docker container. The Docker image is available on the [public AWS ECR registry](https://gallery.ecr.aws/awslabs-mcp/awslabs/aws-api-mcp-server).
-
-```json
-{
-  "mcpServers": {
-    "awslabs.aws-api-mcp-server": {
-      "command": "docker",
-      "args": [
-        "run",
-        "--rm",
-        "--interactive",
-        "--env",
-        "AWS_REGION=us-east-1",
-        "--volume",
-        "/full/path/to/.aws:/app/.aws",
-        "public.ecr.aws/awslabs-mcp/awslabs/aws-api-mcp-server:latest"
-      ],
-      "env": {}
-    }
-  }
-}
-```
-
-### 🔧 Using Cloned Repository
-
-For detailed instructions on setting up your local development environment and running the server from source, please see the CONTRIBUTING.md file.
-
-### 🌐 HTTP Mode Configuration
-
-The MCP server supports streamable HTTP mode. To use it, you must set:
-- `AWS_API_MCP_TRANSPORT` to `"streamable-http"`
-- `AUTH_TYPE` to `"no-auth"` if you want to disable authentication (otherwise OAuth is enabled by default)
-
-Optionally configure the host and port with `AWS_API_MCP_HOST` and `AWS_API_MCP_PORT`.
-
-#### For Linux/macOS:
 ```bash
-AWS_API_MCP_TRANSPORT=streamable-http AUTH_TYPE=no-auth uvx awslabs.aws-api-mcp-server@latest
+# 验证 AWS 凭证是否已正确配置
+aws sts get-caller-identity
+
+export AWS_REGION=us-east-1
+export AWS_DEFAULT_REGION=us-east-1
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ```
 
-#### For Windows (Command Prompt):
-```cmd
-set AWS_API_MCP_TRANSPORT=streamable-http
-set AUTH_TYPE=no-auth
-uvx awslabs.aws-api-mcp-server@latest
+---
+
+## 2.5 重要限制与安全声明（务必先读）
+
+以下限制来自上游 `DEPLOYMENT.md` 和 AgentCore Runtime 本身，在决定是否采用本方案前请务必了解。
+
+### 单用户架构，不适合多租户
+
+> **AgentCore 的 session 隔离只防止"请求之间"数据泄漏，不能防止"不同用户之间"的数据泄漏。**
+
+- 本 MCP Server 的设计就是给**单个使用者**用的。
+- Quick Suite 团队场景下，所有最终用户共享同一个 AgentCore endpoint 和同一个 IAM 执行角色——他们看到的 AWS 数据范围完全相同。
+- 如果不同角色需要访问不同数据，请**部署多个独立的 Runtime**（各自绑定不同的执行角色和 Quick Suite 集成）。
+
+### AgentCore 平台的硬性限制
+
+| 限制 | 影响 |
+|------|------|
+| **文件下载不可取回** | `call_aws` 执行 `aws s3 cp`、`aws logs tail > file` 等操作，文件确实被下载到了容器里，但 stateless 容器在请求结束后即销毁，Quick Suite 端拿不到文件 |
+| **不支持实时流式响应** | AgentCore 会 buffer 完整响应才返回，类似 `aws logs tail --follow` 的实时输出会被切断 |
+| **不支持 MCP elicitation** | `REQUIRE_MUTATION_CONSENT=true` 想要求用户确认的写操作，在 Quick Suite 里不会弹出确认框——会直接失败或被忽略。生产环境请改用 `READ_OPERATIONS_ONLY=true` + 最小权限 IAM 来约束 |
+| **单次请求 60 秒超时** | Quick Suite 侧约束。复杂查询或跨多 region 的 `--region *` 调用容易超时 |
+
+### Prompt 注入风险
+
+`call_aws` 会按 LLM 生成的任意 AWS CLI 命令执行。如果对话中混入不可信内容（例如 CloudWatch 日志里的用户输入、S3 对象里的文本），可能被构造成提示词诱导 LLM 执行非预期命令。**防御只能靠 IAM 权限最小化 + `READ_OPERATIONS_ONLY`**，不要指望在 Prompt 层面做白名单。
+
+---
+
+## 3. 获取源码
+
+### 步骤 2：克隆源码
+
+```bash
+git clone https://github.com/sunl/aws-api-mcp-server-for-amazon-quick.git
 ```
 
-#### For Windows (PowerShell):
-```powershell
-$env:AWS_API_MCP_TRANSPORT="streamable-http"
-$env:AUTH_TYPE="no-auth"
-uvx awslabs.aws-api-mcp-server@latest
+### 步骤 3：本地测试（可选）
+
+如果需要在部署前验证 MCP Server 能正常启动：
+
+```bash
+cd aws-api-mcp-server-for-amazon-quick
+
+# 按 uv.lock 创建项目 venv 并安装运行时依赖
+uv sync --frozen --no-dev
+source .venv/bin/activate
+
+# 启动 MCP Server
+AWS_API_MCP_TRANSPORT=streamable-http \
+AUTH_TYPE=no-auth \
+AWS_API_MCP_HOST=127.0.0.1 \
+AWS_API_MCP_PORT=8000 \
+AWS_REGION=${AWS_REGION} \
+  uv run awslabs.aws-api-mcp-server
+
+# 新开终端，发送 MCP initialize 请求验证
+curl -sS -X POST http://127.0.0.1:8000/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
 ```
 
-Once the server is running, connect to it using the following configuration (ensure the host and port number match your `AWS_API_MCP_HOST` and `AWS_API_MCP_PORT` settings):"
+预期返回
+```
+event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"experimental":{},"prompts":{"listChanged":true},"resources":{"subscribe":false,"listChanged":true},"tools":{"listChanged":true},"extensions":{"io.modelcontextprotocol/ui":{}}},"serverInfo":{"name":"AWS-API-MCP","version":"3.0.1"}}}
+```
 
-```json
+---
+
+## 4. 配置 IAM 执行角色
+
+本节创建 AgentCore 容器运行时使用的执行角色。**跨账号查询的额外配置请在第 6 节处理**。
+
+### 步骤 4：创建信任策略和角色
+
+```bash
+cat > trust-policy.json <<EOF
 {
-  "mcpServers": {
-    "awslabs.aws-api-mcp-server": {
-      "type": "streamableHttp",
-      "url": "http://127.0.0.1:8000/mcp",
-      "autoApprove": [],
-      "disabled": false,
-      "timeout": 60
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "AssumeRolePolicy",
+    "Effect": "Allow",
+    "Principal": {"Service": "bedrock-agentcore.amazonaws.com"},
+    "Action": "sts:AssumeRole",
+    "Condition": {
+      "StringEquals": {"aws:SourceAccount": "${AWS_ACCOUNT_ID}"},
+      "ArnLike": {"aws:SourceArn": "arn:aws:bedrock-agentcore:${AWS_REGION}:${AWS_ACCOUNT_ID}:*"}
     }
-  }
+  }]
 }
+EOF
+
+aws iam create-role \
+  --role-name AwsApiMcpServerAgentCoreRole \
+  --assume-role-policy-document file://trust-policy.json \
+  --description "AgentCore Runtime Role - AWS API MCP Server"
 ```
 
-**Note**: Replace `127.0.0.1` with your custom host if you've set `AWS_API_MCP_HOST` to a different value.
+### 步骤 5：添加 AgentCore 基础权限
 
-### 🔒 HTTP Mode Security Considerations
-
-**IMPORTANT**: When using HTTP mode (`streamable-http`), please be aware of the following security considerations:
-
-- **Single Customer Server**: This HTTP mode is intended for **single customer use only**. It is **NOT designed for multi-tenant environments** or serving multiple users simultaneously
-- **Authentication**: The server can be started with OAuth authentication, using `AUTH_TYPE=oauth`. Set `AUTH_TYPE=no-auth` to disable authentication if needed
-- **Network Security Controls**: Ensure proper network security controls are in place:
-  - Bind to localhost (`127.0.0.1`) when possible
-  - Configure firewall rules to restrict access
-- **Encryption in Transit**: We **strongly recommend** adding encryption in transit when using HTTP mode:
-  - Use HTTPS with TLS/SSL certificates
-  - Avoid transmitting sensitive data over unencrypted HTTP connections
-
-## 🏗️ Self-host on AgentCore Runtime
-
-You can deploy the AWS API MCP Server to Amazon Bedrock AgentCore for managed, scalable hosting with built-in authentication and session isolation. AgentCore provides a containerized runtime environment that handles scaling, security, and infrastructure management automatically.
-
-See [DEPLOYMENT.md](https://github.com/awslabs/mcp/blob/main/src/aws-api-mcp-server/DEPLOYMENT.md) and [AWS Marketplace](https://aws.amazon.com/marketplace/pp/prodview-lqqkwbcraxsgw) for details.
-
-
-
-## ⚙️ Configuration Options
-
-| Environment Variable                                              | Required                   | Default                                                  | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-|-------------------------------------------------------------------|----------------------------|----------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `AWS_REGION`                                                      | ❌ No                       | `"us-east-1"`                                            | Sets the default AWS region for all CLI commands, unless a specific region is provided in the request. If not provided, the MCP server will determine the region just like boto3's [configuration chain](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/configuration.html#overview) but with a fallback to `us-east-1`. This provides a consistent default while allowing flexibility to run commands in different regions as needed.                                                                                                                                                                        |
-| `AWS_API_MCP_WORKING_DIR`                                         | ❌ No                       | \<Platform-specific temp directory\>/aws-api-mcp/workdir | Working directory path for the MCP server operations. Must be an absolute path when provided. Used to resolve relative paths in commands like `aws s3 cp`. Does not provide any sandboxing or security restrictions. When `AWS_API_MCP_ALLOW_UNRESTRICTED_LOCAL_FILE_ACCESS` is set to `"workdir"` (default), file operations are restricted to this directory. If not provided, defaults to a platform-specific directory:<br/><br/>• **Windows**: `%TEMP%\aws-api-mcp\workdir` (typically `C:\Users\<username>\AppData\Local\Temp\aws-api-mcp\workdir`)<br/>• **macOS**: `/private/var/folders/<hash>/T/aws-api-mcp/workdir`<br/>• **Linux**: `$XDG_RUNTIME_DIR/aws-api-mcp/workdir` (if set) or `$TMPDIR/aws-api-mcp/workdir` (if set) or `/tmp/aws-api-mcp/workdir` |
-| `AWS_API_MCP_ALLOW_UNRESTRICTED_LOCAL_FILE_ACCESS`                | ❌ No                       | `"workdir"`                                              | Controls file system access level with three modes:<br/><br/>• `"workdir"` (default): Restricts file operations to `AWS_API_MCP_WORKING_DIR`. When using this mode, ensure to set an appropriate path for your use case since commands with paths outside this directory are rejected.<br/>• `"unrestricted"`: Enables system-wide file access (may cause unintended overwrites). Use only when explicitly required.<br/>• `"no-access"`: Blocks all local file path arguments. Commands requiring local file access (e.g., `aws s3 cp`, `aws cloudformation package`) will fail. S3 URIs (`s3://...`) and stdout redirect (`-`) remain allowed.<br/><br/>**DEPRECATED**: The boolean values `"true"` and `"false"` are supported for backward compatibility. Use `"unrestricted"` instead of `"true"` and `"workdir"` instead of `"false"`. |
-| `AWS_API_MCP_PROFILE_NAME`                                        | ❌ No                       | `"default"`                                              | AWS Profile for credentials to use for command executions. If not provided, the MCP server will follow the boto3's [default credentials chain](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/credentials.html#configuring-credentials) to look for credentials. We strongly recommend you to configure your credentials this way.                                                                                                                                                                                                                                                                            |
-| `READ_OPERATIONS_ONLY`                                            | ❌ No                       | `"false"`                                                | When set to "true", restricts execution to read-only operations only. IAM permissions remain the primary security control. For a complete list of allowed operations under this flag, refer to the [Service Authorization Reference](https://docs.aws.amazon.com/service-authorization/latest/reference/reference_policies_actions-resources-contextkeys.html). Only operations where the **Access level** column is not `Write` will be allowed when this is set to "true".                                                                                                                                                 |
-| `REQUIRE_MUTATION_CONSENT`                                        | ❌ No                       | `"false"`                                                | When set to "true", the MCP server will ask explicit consent before executing any operations that are **NOT** read-only. This safety mechanism uses [elicitation](https://modelcontextprotocol.io/docs/concepts/elicitation) so it requires a [client that supports elicitation](https://modelcontextprotocol.io/clients).                                                                                                                                                                                                                                                                                                   |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | ❌ No                       | -                                                        | Use environment variables to configure AWS credentials                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `AWS_API_MCP_TELEMETRY`                                           | ❌ No                       | `"true"`                                                 | Allow sending additional telemetry data to AWS related to the server configuration. This includes Whether the `call_aws()` tool is used with `READ_OPERATIONS_ONLY` set to true or false. Note: Regardless of this setting, AWS obtains information about which operations were invoked and the server version as part of normal AWS service interactions; no additional telemetry calls are made by the server for this purpose.                                                                                                                                                                                            |
-| `EXPERIMENTAL_AGENT_SCRIPTS`                                      | ❌ No                       | `"false"`                                                | When set to "true", enables experimental agent scripts functionality. This provides access to structured, step-by-step workflows for complex AWS tasks through the `get_execution_plan` tool. Agent scripts are reusable workflows that automate complex processes and provide detailed guidance for accomplishing specific tasks. This feature is experimental and may change in future releases.                                                                                                                                                                                                                           |
-| `AWS_API_MCP_AGENT_SCRIPTS_DIR`                                   | ❌ No                       | -                                                        | Directory path containing custom user scripts for the agent scripts functionality. When specified, the server will load additional `.script.md` files from this directory alongside the built-in scripts. The directory must exist and be readable. Scripts must follow the same format as built-in scripts with frontmatter metadata including a `description` field. This allows users to extend the agent scripts functionality with their own custom workflows.                                                                                                                                                          |
-| `AWS_API_MCP_TRANSPORT`                                           | ❌ No                       | `"stdio"`                                                | Transport protocol for the MCP server. Valid options are `"stdio"` (default) for local communication or `"streamable-http"` for HTTP-based communication. When using `"streamable-http"`, the server will listen on the host and port specified by `AWS_API_MCP_HOST` and `AWS_API_MCP_PORT`.                                                                                                                                                                                                                                                                                                                                |
-| `AWS_API_MCP_HOST`                                                | ❌ No                       | `"127.0.0.1"`                                            | Host address for the MCP server when using `"streamable-http"` transport. Only used when `AWS_API_MCP_TRANSPORT` is set to `"streamable-http"`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `AWS_API_MCP_PORT`                                                | ❌ No                       | `"8000"`                                                 | Port number for the MCP server when using `"streamable-http"` transport. Only used when `AWS_API_MCP_TRANSPORT` is set to `"streamable-http"`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `AWS_API_MCP_ALLOWED_HOSTS`                                       | ❌ No                       | `AWS_API_MCP_HOST`                                       | Comma-separated list of allowed host hostnames for HTTP requests. Used to validate the `Host` header in incoming requests. Set to `*` to allow all hosts (not recommended for production). Port numbers are automatically stripped during validation. Only used when `AWS_API_MCP_TRANSPORT` is set to `"streamable-http"`.                                                                                                                                                                                                                                                                                                  |
-| `AWS_API_MCP_ALLOWED_ORIGINS`                                     | ❌ No                       | `AWS_API_MCP_HOST`                                       | Comma-separated list of allowed origin hostnames for HTTP requests. Used to validate the `Origin` header in incoming requests. Set to `*` to allow all origins (not recommended for production). Port numbers are automatically stripped during validation. Only used when `AWS_API_MCP_TRANSPORT` is set to `"streamable-http"`.                                                                                                                                                                                                                                                                                            |
-| `AWS_API_MCP_STATELESS_HTTP`                                      | ❌ No                       | `"false"`                                                | ⚠️ **WARNING: We strongly recommend keeping this set to "false" due to significant security implications.** When set to "true", creates a completely fresh transport for each request with no session tracking or state persistence between requests. Only used when `AWS_API_MCP_TRANSPORT` is set to `"streamable-http"`.                                                                                                                                                                                                                                                                                                      |
-| `AUTH_TYPE`                                                       | ❌ No                       | -                                                | Only used when `AWS_API_MCP_TRANSPORT` is set to `"streamable-http"`. Authentication type for the MCP server. When set to `"no-auth"`, disables authentication. When set to `"oauth"`, enables OAuth authentication and requires `AUTH_ISSUER` and `AUTH_JWKS_URI` to be configured.                                                                                                                                                                                                                                                                                                                                            |
-| `AUTH_ISSUER`                                                     | ❌ No                       | -                                                        | Only used when `AWS_API_MCP_TRANSPORT` is set to `"streamable-http"`. OAuth issuer URL for JWT token validation. The issuer that will be validated in JWT tokens. Example: `"https://your-auth-provider.com/"`. Required when `AUTH_TYPE` is set to `"oauth"`.                                                                                                                                                                                                                                                                                                                                                                        |
-| `AUTH_JWKS_URI`                                                   | ❌ No                       | -                                                        | Only used when `AWS_API_MCP_TRANSPORT` is set to `"streamable-http"`. JWKS (JSON Web Key Set) endpoint URL for JWT token validation. This should be a publicly accessible HTTPS URL that serves the JSON Web Key Set used to verify JWT signatures. Example: `"https://your-auth-provider.com/.well-known/jwks.json"`. Required when `AUTH_TYPE` is set to `"oauth"`.                                                                                                                                                                                                                                                         |
-
-### 🚀 Quick Start
-
-Once configured, you can ask your AI assistant questions such as:
-
-- **"List all my EC2 instances"**
-- **"Show me S3 buckets in us-west-2"**
-- **"Create a new security group for web servers"** *(Only with write permission)*
-
-
-## Features
-
-- **Comprehensive AWS CLI Support**: Supports all commands available in the latest AWS CLI version, ensuring access to the most recent AWS services and features
-- **Help in Command Selection**: Helps AI assistants select the most appropriate AWS CLI commands to accomplish specific tasks
-- **Command Validation**: Ensures safety by validating all AWS CLI commands before execution, preventing invalid or potentially harmful operations
-- **Hallucination Protection**: Mitigates the risk of model hallucination by strictly limiting execution to valid AWS CLI commands only - no arbitrary code execution is permitted
-- **Security-First Design**: Built with security as a core principle, providing multiple layers of protection to safeguard your AWS infrastructure
-- **Read-Only Mode**: Provides an extra layer of security that disables all mutating operations, allowing safe exploration of AWS resources
-
-
-## Available MCP Tools
-The tool names are subject to change, please refer to CHANGELOG.md for any changes and adapt your workflows accordingly.
-
-- `call_aws`: Executes AWS CLI commands with validation and proper error handling
-- `suggest_aws_commands`: Suggests AWS CLI commands based on a natural language query. This tool helps the model generate CLI commands by providing a description and the complete set of parameters for the 5 most likely CLI commands for the given query, including the most recent AWS CLI commands - some of which may be otherwise unknown to the model (released after the model's knowledge cut-off date).
-- `get_execution_plan` *(Experimental)*: Provides structured, step-by-step guidance for accomplishing complex AWS tasks through agent scripts. This tool is only available when the `EXPERIMENTAL_AGENT_SCRIPTS` environment variable is set to "true". Agent scripts are reusable workflows that automate complex processes and provide detailed guidance for accomplishing specific tasks.
-
-
-## Security Considerations
-Before using this MCP Server, you should consider conducting your own independent assessment to ensure that your use would comply with your own specific security and quality control practices and standards, as well as the laws, rules, and regulations that govern you and your content.
-
-### ⚠️ Multi-Tenant Environment Restrictions
-
-**IMPORTANT**: This MCP server is **NOT designed for multi-tenant environments**. Do not use this server to serve multiple users or tenants simultaneously.
-
-- **Single User Only**: Each instance of the MCP server should serve only one user with their own dedicated AWS credentials
-- **Separate Directories**: When running multiple instances, create separate working directories for each instance using the `AWS_API_MCP_WORKING_DIR` environment variable
-
-### 🔑 Credential Management and Access Control
-
-We use credentials to control which commands this MCP server can execute. This MCP server relies on IAM roles to be configured properly, in particular:
-- Using credentials for an IAM role with `AdministratorAccess` policy (usually the `Admin` IAM role) permits mutating actions (i.e. creating, deleting, modifying your AWS resources) and non-mutating actions.
-- Using credentials for an IAM role with `ReadOnlyAccess` policy (usually the `ReadOnly` IAM role) only allows non-mutating actions, this is sufficient if you only want to inspect resources in your account.
-- If IAM roles are not available, [these alternatives](https://docs.aws.amazon.com/cli/v1/userguide/cli-configure-files.html#cli-configure-files-examples) can also be used to configure credentials.
-- To add another layer of security, users can explicitly set the environment variable `READ_OPERATIONS_ONLY` to true in their MCP config file. When set to true, we'll compare each CLI command against a list of known read-only actions, and will only execute the command if it's found in the allowed list. "Read-Only" only refers to the API classification, not the file system, that is such "read-only" actions can still write to the file system if necessary or upon user request. While this environment variable provides an additional layer of protection, IAM permissions remain the primary and most reliable security control. Users should always configure appropriate IAM roles and policies for their use case, as IAM credentials take precedence over this environment variable.
-- ⚠️ **IMPORTANT**: While using a `ReadOnlyAccess` IAM role will block write operations through the MCP server, **however some AWS read only operations can still return AWS credentials or sensitive information** in command outputs that could potentially be used outside of this server.
-
-Our MCP server aims to support all AWS APIs. However, some of them will spawn subprocesses that expose security risks. Such APIs will be denylisted, see the full list below.
-
-| Service | Operations |
-|---------|------------|
-| **deploy** | `install`, `uninstall` |
-| **emr** | `ssh`,  `sock`, `get`, `put` |
-
-### File System Access and Operating Mode
-
-**Important**: This MCP server is intended for **STDIO mode only** as a local server using a single user's credentials. The server runs with the same permissions as the user who started it and has complete access to the file system.
-
-#### Security and Access Considerations
-
-- **No Sandboxing**: The `AWS_API_MCP_WORKING_DIR` environment variable sets a working directory. The `AWS_API_MCP_ALLOW_UNRESTRICTED_LOCAL_FILE_ACCESS` flag by default is set to `"workdir"` which restricts MCP server file operations to `<AWS_API_MCP_WORKING_DIR>`. Setting to `"unrestricted"` enables system-wide file access but may cause unintended overwrites. Setting to `"no-access"` disables local file access.
-- **File System Access**: The server can read from and write to any location on the file system where the user has permissions.
-- **No Confirmation Prompts**: Files can be modified, overwritten, or deleted without any additional user confirmation
-- **Host File System Sharing**: When using this server, the host file system is directly accessible
-- **Do Not Modify for Network Use**: This server is designed for local STDIO use only; network operation introduces additional security risks
-
-#### Common File Operations
-
-The MCP server can perform various file operations through AWS CLI commands, including:
-
-- `aws s3 sync` - Can overwrite entire directories without warning
-- `aws s3 cp` - Can overwrite existing files without confirmation
-- Any AWS CLI command using the `outfile` parameter
-- Commands that use the `file://` prefix to read from files
-
-**Note**: While the `AWS_API_MCP_WORKING_DIR` environment variable sets where the server starts, it does not restrict where files can be accessed.
-
-### Prompt Injection and Untrusted Data
-This MCP server executes AWS CLI commands as instructed by an AI model, which can be vulnerable to prompt injection attacks:
-
-- **Do not connect this MCP server to data sources with untrusted data** (e.g., CloudWatch logs containing raw user data, user-generated content in databases, etc.)
-- Always use scoped-down IAM credentials with minimal permissions necessary for the specific task.
-- Be aware that prompt injection vulnerabilities are a known issue with LLMs and not caused by MCP servers inherently. When working with untrusted data use a client that supports command validation with a human in the loop.
-
-### Logging
-
-The AWS API MCP server writes logs to help you monitor command executions, troubleshoot issues, and perform debugging. These logs are automatically rotated and contain operational data including command executions, errors, and debug information.
-
-#### Log file location
-
-Logs are written to a rotating file at:
-
-- **macOS/Linux**: `<HOME>/.aws/aws-api-mcp/aws-api-mcp-server.log`
-- **Windows**: `%USERPROFILE%\.aws\aws-api-mcp\aws-api-mcp-server.log`
-
-#### Shipping logs to Amazon CloudWatch Logs
-
-To centralize your logs in AWS CloudWatch for better monitoring and analysis, you can use the CloudWatch Agent to automatically ship the MCP server logs to a CloudWatch log group.
-
-**Prerequisites:**
-
-1. **Install the CloudWatch Agent** on your machine:
-   - **Amazon Linux 2/2023**: `sudo yum install amazon-cloudwatch-agent`
-   - **Other platforms**: Download from [CloudWatch Agent download page](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/download-CloudWatch-Agent-on-EC2-Instance-commandline-first.html)
-   - **Learn more**: [CloudWatch Agent overview](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Install-CloudWatch-Agent.html)
-
-2. **Configure IAM permissions**: Ensure your instance/user has permissions to write to CloudWatch Logs. You can attach the `CloudWatchAgentServerPolicy` or create a custom policy with these permissions:
-   - `logs:CreateLogGroup`
-   - `logs:CreateLogStream`
-   - `logs:PutLogEvents`
-
-**Configuration steps:**
-
-1. **Run the configuration wizard** to set up log collection. The wizard will guide you through configuring the log group name, stream name, and other settings. For detailed wizard documentation, see [Create the CloudWatch agent configuration file with the wizard](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/create-cloudwatch-agent-configuration-file-wizard.html).:
-
-   **Linux/macOS:**
-   ```bash
-   sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-config-wizard
-   ```
-
-   **Windows:**
-   ```cmd
-   cd "C:\Program Files\Amazon\AmazonCloudWatchAgent"
-   .\amazon-cloudwatch-agent-config-wizard.exe
-   ```
-
-2. **When prompted for log file path**, specify the MCP server log location:
-   - **macOS**: `/Users/<user>/.aws/aws-api-mcp/aws-api-mcp-server.log`
-   - **Linux**: `/home/<user>/.aws/aws-api-mcp/aws-api-mcp-server.log`
-   - **Windows**: `C:\Users\<user>\.aws\aws-api-mcp\aws-api-mcp-server.log`
-
-3. **Start the CloudWatch Agent** following the official AWS documentation:
-   - [Starting the CloudWatch agent](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/start-CloudWatch-Agent-on-premise-SSM-onprem.html)
-
-#### Troubleshooting
-
-If you encounter issues with the CloudWatch Agent setup or log shipping, refer to the [Troubleshooting the CloudWatch agent](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/troubleshooting-CloudWatch-Agent.html).
-
-### Security Best Practices
-
-- **Principle of Least Privilege**: While the examples above use AWS managed policies like `AdministratorAccess` and `ReadOnlyAccess` for simplicity, we **strongly** recommend following the principle of least privilege by creating custom policies tailored to your specific use case.
-- **Minimal Permissions**: Start with minimal permissions and gradually add access as needed for your specific workflows.
-- **Condition Statements**: Combine custom policies with condition statements to further restrict access by region or other factors based on your security requirements.
-- **Untrusted Data Sources**: When connecting to potentially untrusted data sources, use scoped-down credentials with minimal permissions.
-- **Regular Monitoring**: Monitor AWS CloudTrail logs to track actions performed by the MCP server.
-
-### Custom Security Policy Configuration
-
-You can create a custom security policy file to define additional security controls beyond IAM permissions. The MCP server will look for a security policy file at `~/.aws/aws-api-mcp/mcp-security-policy.json`.
-
-#### Security Policy File Format
-
-```json
+```bash
+cat > agentcore-base-policy.json <<EOF
 {
-  "version": "1.0",
-  "policy": {
-    "denyList": [],
-    "elicitList": []
-  }
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Sid": "ECRImageAccess", "Effect": "Allow", "Action": ["ecr:BatchGetImage","ecr:GetDownloadUrlForLayer"], "Resource": ["arn:aws:ecr:${AWS_REGION}:${AWS_ACCOUNT_ID}:repository/*"]},
+    {"Sid": "ECRTokenAccess", "Effect": "Allow", "Action": ["ecr:GetAuthorizationToken"], "Resource": "*"},
+    {"Sid": "LogsCreate", "Effect": "Allow", "Action": ["logs:DescribeLogStreams","logs:CreateLogGroup"], "Resource": ["arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:/aws/bedrock-agentcore/runtimes/*"]},
+    {"Sid": "LogsDescribe", "Effect": "Allow", "Action": ["logs:DescribeLogGroups"], "Resource": ["arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:*"]},
+    {"Sid": "LogsWrite", "Effect": "Allow", "Action": ["logs:CreateLogStream","logs:PutLogEvents"], "Resource": ["arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"]},
+    {"Sid": "XRay", "Effect": "Allow", "Action": ["xray:PutTraceSegments","xray:PutTelemetryRecords","xray:GetSamplingRules","xray:GetSamplingTargets"], "Resource": "*"},
+    {"Sid": "Metrics", "Effect": "Allow", "Action": "cloudwatch:PutMetricData", "Resource": "*", "Condition": {"StringEquals": {"cloudwatch:namespace": "bedrock-agentcore"}}},
+    {"Sid": "GetAgentAccessToken", "Effect": "Allow", "Action": ["bedrock-agentcore:GetWorkloadAccessToken","bedrock-agentcore:GetWorkloadAccessTokenForJWT","bedrock-agentcore:GetWorkloadAccessTokenForUserId"], "Resource": ["arn:aws:bedrock-agentcore:${AWS_REGION}:${AWS_ACCOUNT_ID}:workload-identity-directory/default","arn:aws:bedrock-agentcore:${AWS_REGION}:${AWS_ACCOUNT_ID}:workload-identity-directory/default/workload-identity/*"]}
+  ]
 }
+EOF
+
+aws iam put-role-policy \
+  --role-name AwsApiMcpServerAgentCoreRole \
+  --policy-name AgentCoreBasePolicy \
+  --policy-document file://agentcore-base-policy.json
 ```
 
-#### Command Format Requirements
+### 步骤 6：添加 AWS API 查询权限（**最关键的一步**）
 
-**Important**: Commands must be specified in the exact format that the AWS CLI uses internally:
+与只需要固定几类 API 的 billing 类 MCP 不同，`call_aws` 工具是通用 AWS CLI 执行器，**能调什么 API 完全取决于你给执行角色的权限**。官方 `DEPLOYMENT.md` 明确警告：**绝不要挂 `AdministratorAccess`**。
 
-- **Format**: `aws <service> <operation>`
-- **Service names**: Use the AWS CLI service name (e.g., `s3api`, `ec2`, `iam`, `lambda`)
-- **Operation names**: Use kebab-case format (e.g., `delete-user`, `list-buckets`, `stop-instances`)
+**选项 A（推荐起步）：挂 `ReadOnlyAccess`**
 
-#### Examples of Correct Command Formats
+```bash
+aws iam attach-role-policy \
+  --role-name AwsApiMcpServerAgentCoreRole \
+  --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
+```
 
-| AWS CLI Command | Security Policy Format |
-|-----------------|------------------------|
-| `aws iam delete-user --user-name john` | `"aws iam delete-user"` |
-| `aws s3api list-buckets` | `"aws s3api list-buckets"` |
-| `aws ec2 describe-instances` | `"aws ec2 describe-instances"` |
-| `aws lambda delete-function --function-name my-func` | `"aws lambda delete-function"` |
-| `aws s3 cp file.txt s3://bucket/` | `"aws s3 cp"` |
-| `aws cloudformation delete-stack --stack-name my-stack` | `"aws cloudformation delete-stack"` |
+**选项 B：自定义策略（只允许特定服务）**
 
-#### Policy Configuration Options
+按最小权限原则为你实际需要的服务写 custom policy，示例：
 
-- **`denyList`**: Array of AWS CLI commands that will be completely blocked. Commands in this list will never be executed.
-- **`elicitList`**: Array of AWS CLI commands that will require explicit user consent before execution. This requires a client that supports [elicitation](https://modelcontextprotocol.io/docs/concepts/elicitation).
-
-#### Pattern Matching and Wildcards
-
-**Current Limitation**: The security policy uses **exact string matching only**. Wildcard patterns (like `iam:delete-*` or `organizations:*`) are **not supported** in the current implementation.
-
-Each command must be specified exactly as it appears in the AWS CLI format. For comprehensive blocking, you need to list each command individually:
-
-```json
+```bash
+cat > custom-aws-permissions.json <<EOF
 {
-  "version": "1.0",
-  "policy": {
-    "denyList": [
-      "aws iam delete-user",
-      "aws iam delete-role",
-      "aws iam delete-group",
-      "aws iam delete-policy",
-      "aws iam delete-access-key"
-    ],
-    "elicitList": [
-      "aws s3api delete-object",
-      "aws ec2 stop-instances",
-      "aws lambda delete-function",
-      "aws rds delete-db-instance",
-      "aws cloudformation delete-stack"
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": ["s3:GetObject","s3:ListBucket"], "Resource": ["arn:aws:s3:::your-bucket","arn:aws:s3:::your-bucket/*"]},
+    {"Effect": "Allow", "Action": ["ec2:DescribeInstances","ec2:DescribeImages"], "Resource": "*", "Condition": {"StringEquals": {"ec2:Region": "${AWS_REGION}"}}}
+  ]
+}
+EOF
+
+aws iam put-role-policy \
+  --role-name AwsApiMcpServerAgentCoreRole \
+  --policy-name CustomAWSPermissions \
+  --policy-document file://custom-aws-permissions.json
+```
+
+建议同时在部署时开启 `READ_OPERATIONS_ONLY=true`（见步骤 13）作为代码级的第二道防线。
+
+```bash
+export EXECUTION_ROLE_ARN=$(aws iam get-role --role-name AwsApiMcpServerAgentCoreRole --query 'Role.Arn' --output text)
+echo "Execution Role ARN: ${EXECUTION_ROLE_ARN}"
+```
+
+---
+
+## 5. 设置 Cognito 认证
+
+### 步骤 7：创建 User Pool 和测试用户
+
+```bash
+export POOL_NAME="agentcore-api-mcp-pool"
+
+export POOL_ID=$(aws cognito-idp create-user-pool \
+  --pool-name "${POOL_NAME}" \
+  --policies '{"PasswordPolicy":{"MinimumLength":8}}' \
+  --region ${AWS_REGION} | jq -r '.UserPool.Id')
+
+export CLIENT_ID=$(aws cognito-idp create-user-pool-client \
+  --user-pool-id ${POOL_ID} \
+  --client-name "AwsApiMcpTestClient" \
+  --no-generate-secret \
+  --explicit-auth-flows "ALLOW_USER_PASSWORD_AUTH" "ALLOW_REFRESH_TOKEN_AUTH" \
+  --region ${AWS_REGION} | jq -r '.UserPoolClient.ClientId')
+
+export COGNITO_USERNAME="<YOUR_USERNAME>"
+export COGNITO_PASSWORD="<YOUR_SECURE_PASSWORD>"
+
+aws cognito-idp admin-create-user \
+  --user-pool-id ${POOL_ID} --username ${COGNITO_USERNAME} \
+  --region ${AWS_REGION} --message-action SUPPRESS > /dev/null
+
+aws cognito-idp admin-set-user-password \
+  --user-pool-id ${POOL_ID} --username ${COGNITO_USERNAME} \
+  --password ${COGNITO_PASSWORD} --region ${AWS_REGION} --permanent > /dev/null
+
+export DISCOVERY_URL="https://cognito-idp.${AWS_REGION}.amazonaws.com/${POOL_ID}/.well-known/openid-configuration"
+echo "Discovery URL: ${DISCOVERY_URL}"
+echo "Client ID:     ${CLIENT_ID}"
+```
+
+### 步骤 8：创建 Cognito Domain
+
+```bash
+export COGNITO_DOMAIN_PREFIX="api-mcp-$(echo ${AWS_ACCOUNT_ID} | tail -c 9)"
+
+aws cognito-idp create-user-pool-domain \
+  --user-pool-id ${POOL_ID} \
+  --domain ${COGNITO_DOMAIN_PREFIX} \
+  --region ${AWS_REGION}
+
+echo "Cognito Domain: ${COGNITO_DOMAIN_PREFIX}"
+```
+
+### 步骤 9：创建 Resource Server
+
+Service authentication (2LO) 使用 `client_credentials`，Cognito 要求必须有 Resource Server 定义 scope。
+
+```bash
+aws cognito-idp create-resource-server \
+  --user-pool-id ${POOL_ID} \
+  --identifier "aws-api-mcp" \
+  --name "AWS API MCP Server" \
+  --scopes '[{"ScopeName":"invoke","ScopeDescription":"Invoke AWS API MCP Server"}]' \
+  --region ${AWS_REGION}
+```
+
+### 步骤 10：创建 Machine-to-Machine App Client（Quick Suite 专用）
+
+```bash
+QS_M2M_RESULT=$(aws cognito-idp create-user-pool-client \
+  --user-pool-id ${POOL_ID} \
+  --client-name "QuickSuiteM2MClient" \
+  --generate-secret \
+  --allowed-o-auth-flows "client_credentials" \
+  --allowed-o-auth-scopes "aws-api-mcp/invoke" \
+  --allowed-o-auth-flows-user-pool-client \
+  --supported-identity-providers "COGNITO" \
+  --region ${AWS_REGION})
+
+export QS_M2M_CLIENT_ID=$(echo ${QS_M2M_RESULT} | jq -r '.UserPoolClient.ClientId')
+export QS_M2M_CLIENT_SECRET=$(echo ${QS_M2M_RESULT} | jq -r '.UserPoolClient.ClientSecret')
+
+echo "M2M Client ID:     ${QS_M2M_CLIENT_ID}"
+echo "M2M Client Secret: ${QS_M2M_CLIENT_SECRET}"
+```
+
+---
+
+## 6. 跨账号查询配置（可选）
+
+如果你希望通过 `target_account_id` 参数查询**其他账号**的 AWS 数据，需要在源账号和每个目标账号上分别配置 IAM。不需要跨账号查询可跳过本节。设计原理参见 [cross-account-support.md](./cross-account-support.md)。
+
+默认角色名为 `AwsApiMcpCrossAccountRole`。如需自定义，部署时通过 `CROSS_ACCOUNT_ROLE_NAME` 环境变量覆盖（见步骤 13 的 `envVars`），并同步替换本节的角色名。
+
+### 步骤 11：给源账号执行角色添加 AssumeRole 权限
+
+```bash
+cat > cross-account-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "CrossAccountAssumeRole",
+    "Effect": "Allow",
+    "Action": "sts:AssumeRole",
+    "Resource": [
+      "arn:aws:iam::<目标账号A>:role/AwsApiMcpCrossAccountRole",
+      "arn:aws:iam::<目标账号B>:role/AwsApiMcpCrossAccountRole"
     ]
-  }
+  }]
+}
+EOF
+
+aws iam put-role-policy \
+  --role-name AwsApiMcpServerAgentCoreRole \
+  --policy-name CrossAccountAssumeRolePolicy \
+  --policy-document file://cross-account-policy.json
+```
+
+### 步骤 12：在每个目标账号中创建同名角色
+
+```bash
+# 在目标账号中执行
+
+cat > trust-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "AWS": "arn:aws:iam::<源账号ID>:role/AwsApiMcpServerAgentCoreRole"
+    },
+    "Action": "sts:AssumeRole"
+  }]
+}
+EOF
+
+aws iam create-role \
+  --role-name AwsApiMcpCrossAccountRole \
+  --assume-role-policy-document file://trust-policy.json \
+  --description "Cross-account role for AWS API MCP Server"
+
+# 最小权限起步，视需要收紧
+aws iam attach-role-policy \
+  --role-name AwsApiMcpCrossAccountRole \
+  --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
+```
+
+---
+
+## 7. 配置并部署到 AgentCore Runtime
+
+> **注意**：新版 AgentCore CLI（`@aws/agentcore`）使用 `agentcore create` 创建项目、`agentcore deploy` 部署，取代了旧版的 `agentcore configure` + `agentcore launch` 工作流。配置文件也从 `.bedrock_agentcore.yaml` 迁移到 `agentcore/agentcore.json`。详见 [AgentCore CLI GitHub](https://github.com/aws/agentcore-cli) 和 [官方文档](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-cli.html)。
+
+### 步骤 13：初始化 AgentCore 项目并放入源码
+
+使用 `agentcore create` 创建项目脚手架：
+
+```bash
+# 如果当前在 aws-api-mcp-server-for-amazon-quick 目录则先回到上一级目录
+cd ..
+
+agentcore create --project-name awsapi --name mcpserver --protocol MCP --build Container
+cd awsapi
+```
+
+该命令会创建项目目录 `awsapi/`，结构如下：
+
+```
+awsapi/
+  AGENTS.md
+  README.md
+  agentcore/
+    agentcore.json        # 项目和 agent 配置
+    aws-targets.json      # AWS 账号和区域目标
+    .env.local            # 本地环境变量（已 gitignore）
+  app/
+    mcpserver/
+      Dockerfile
+      README.md
+      main.py             # 脚手架生成的入口文件（将被替换）
+      pyproject.toml      # Python 依赖
+      uv.lock
+```
+
+将 MCP Server 源码放入 `app/mcpserver/`（即 `codeLocation` 指向的目录）：
+
+```bash
+# 清理脚手架生成的默认文件
+rm -rf app/mcpserver/*
+
+# 将 MCP Server 源码完整复制进来（排除 .git 和 .venv）
+rsync -av --exclude='.git' --exclude='.venv' \
+  ../aws-api-mcp-server-for-amazon-quick/ \
+  app/mcpserver/
+```
+
+最终 `app/mcpserver/` 目录结构应为：
+
+```
+app/mcpserver/
+  awslabs/
+    aws_api_mcp_server/
+      server.py
+      ...
+  Dockerfile
+  docker-healthcheck.sh
+  pyproject.toml
+  uv.lock
+  uv-requirements.txt
+```
+
+编辑 `agentcore/agentcore.json`，在自动生成的配置基础上添加 `executionRoleArn`、`authorizerConfiguration` 以及 `envVars`。以下是需要修改的关键字段（其余字段保持默认即可）：
+
+```json
+{
+  "$schema": "https://schema.agentcore.aws.dev/v1/agentcore.json",
+  "name": "awsapi",
+  "version": 1,
+  "runtimes": [
+    {
+      "name": "mcpserver",
+      "build": "Container",
+      "entrypoint": "awslabs/aws_api_mcp_server/server.py",
+      "codeLocation": "app/mcpserver/",
+      "dockerfile": "Dockerfile",
+      "runtimeVersion": "PYTHON_3_14",
+      "networkMode": "PUBLIC",
+      "instrumentation": {
+        "enableOtel": false
+      },
+      "protocol": "MCP",
+      "executionRoleArn": "<粘贴 ${EXECUTION_ROLE_ARN} 的实际值>",
+      "authorizerType": "CUSTOM_JWT",
+      "authorizerConfiguration": {
+        "customJwtAuthorizer": {
+          "discoveryUrl": "<粘贴 ${DISCOVERY_URL} 的实际值>",
+          "allowedClients": [
+            "<步骤 7 创建的 CLIENT_ID，测试用>",
+            "<步骤 10 创建的 QS_M2M_CLIENT_ID，Quick Suite 必须加入>"
+          ]
+        }
+      },
+      "envVars": [
+        { "name": "AWS_REGION", "value": "us-east-1" },
+        { "name": "AWS_API_MCP_TRANSPORT", "value": "streamable-http" },
+        { "name": "AWS_API_MCP_HOST", "value": "0.0.0.0" },
+        { "name": "AWS_API_MCP_PORT", "value": "8000" },
+        { "name": "AWS_API_MCP_ALLOWED_HOSTS", "value": "*" },
+        { "name": "AWS_API_MCP_ALLOWED_ORIGINS", "value": "*" },
+        { "name": "AWS_API_MCP_STATELESS_HTTP", "value": "true" },
+        { "name": "AUTH_TYPE", "value": "no-auth" },
+        { "name": "READ_OPERATIONS_ONLY", "value": "true" }
+      ]
+    }
+  ]
 }
 ```
 
-#### Finding the Correct Command Format
+> **说明**：以上仅列出需要关注的字段，`agentcore create` 自动生成的其他字段（`managedBy`、`tags`、`memories`、`credentials` 等）保持原样不动。
+>
+> **关于 Dockerfile**：本仓库自带的 `Dockerfile` 已经配好 uv + Python 3.13 + 合适的 entrypoint，上面将 `dockerfile` 指向 `Dockerfile` 即可直接使用。`runtimeVersion: PYTHON_3_13` 与 Dockerfile 中的 `uv sync --python 3.13` 保持一致。
+>
+> **重要**：`allowedClients` 必须同时包含步骤 7 创建的测试用 Client ID 和步骤 10 创建的 M2M Client ID。Quick Suite 使用 M2M Client ID 获取 token，如果该 ID 不在允许列表中，连接时会被拒绝。
+>
+> 如果 `agentcore create` 因任何原因失败或需要重新配置，可以直接手动创建或编辑 `agentcore/agentcore.json` 文件。
 
-To determine the exact format for a command:
+**容器运行时环境变量说明（全部必需，除非注明）：**
 
-1. **Check AWS CLI documentation**: Look up the service and operation names
-2. **Use kebab-case**: Convert camelCase operations to kebab-case (e.g., `ListBuckets` → `list-buckets`)
-3. **Test with logging**: Enable debug logging to see how commands are parsed internally
+上面 `envVars` 数组中每个变量的含义：
 
-#### Security Policy Precedence
+- `AWS_REGION` —— MCP Server 启动时校验此变量必须存在。AgentCore 平台通常会自动把部署所在区域注入到容器，但为了避免平台行为变化导致启动失败，**建议显式设置**。
+- `AWS_API_MCP_TRANSPORT=streamable-http` —— 默认 `stdio`，不改 AgentCore 连不上。
+- `AWS_API_MCP_HOST=0.0.0.0` —— 默认 `127.0.0.1`，不改会导致 AgentCore 无法连接容器内的服务。
+- `AWS_API_MCP_PORT=8000` —— AgentCore 默认把流量转发到容器 8000 端口。
+- `AWS_API_MCP_ALLOWED_HOSTS=*` / `AWS_API_MCP_ALLOWED_ORIGINS=*` —— AgentCore 代理请求时的 Host header 不可预测；默认的严格校验会拒绝所有请求。安全由 AgentCore 入站认证和 IAM 保证。
+- `AWS_API_MCP_STATELESS_HTTP=true` —— AgentCore 已在平台层做会话隔离；容器内不需要再维护 session。
+- `AUTH_TYPE=no-auth` —— **官方硬性要求**。入站认证由 AgentCore Runtime 的 JWT Authorizer 统一处理（就是 `agentcore.json` 中 `customJwtAuthorizer` + `allowedClients` 那段）。若设为 `oauth`，容器内的 FastMCP 会再做一次 JWT 校验，与 AgentCore 层冲突导致请求被拒。
+- `READ_OPERATIONS_ONLY=true` —— 即使执行角色挂的是 `ReadOnlyAccess`，再加一层代码级白名单更稳妥。生产环境如需写操作再设为 `false`。
+- （可选）`CROSS_ACCOUNT_ROLE_NAME=AwsApiMcpCrossAccountRole` —— 仅当第 6 节使用了非默认角色名时才需要追加到 `envVars` 数组。
 
-1. **Denylist** - Operations in the denylist are blocked completely
-2. **Elicitation Required** - Operations requiring consent will prompt the user
-3. **IAM Permissions** - Standard AWS IAM controls apply to all operations
-4. **READ_OPERATIONS_ONLY** - Environment variable restriction (if enabled)
+**确认 `agentcore/aws-targets.json` 的部署目标。** 使用 `-y` 或 `--dry-run` 等非交互模式时，必须配置 target：
 
-**Note**: IAM permissions remain the primary security control mechanism. The security policy provides an additional layer of protection but cannot override IAM restrictions.
+```bash
+# 先确认当前账号和区域
+echo "Account: ${AWS_ACCOUNT_ID}"
+echo "Region: ${AWS_REGION}"
+```
 
-## License
-Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+然后编辑 `agentcore/aws-targets.json`，将空数组替换为：
 
-Licensed under the Apache License, Version 2.0 (the "License").
+```json
+[
+  {
+    "name": "default",
+    "account": "<你的 AWS_ACCOUNT_ID>",
+    "region": "<你的 AWS_REGION>"
+  }
+]
+```
 
+> 交互模式下（直接运行 `agentcore deploy` 不带参数），CLI 会自动检测当前 AWS 凭证的账号和区域，可以不配置此文件。
 
-## Disclaimer
-This aws-api-mcp package is provided "as is" without warranty of any kind, express or implied, and is intended for development, testing, and evaluation purposes only. We do not provide any guarantee on the quality, performance, or reliability of this package. LLMs are non-deterministic and they make mistakes, we advise you to always thoroughly test and follow the best practices of your organization before using these tools on customer facing accounts. Users of this package are solely responsible for implementing proper security controls and MUST use AWS Identity and Access Management (IAM) to manage access to AWS resources. You are responsible for configuring appropriate IAM policies, roles, and permissions, and any security vulnerabilities resulting from improper IAM configuration are your sole responsibility. By using this package, you acknowledge that you have read and understood this disclaimer and agree to use the package at your own risk.
+### 步骤 14：部署
+
+使用 `--dry-run` 预览部署变更，如果 CDK 之前没有 bootstrap 过，需要加上 `--yes` 参数（可选）：
+
+```bash
+agentcore deploy --dry-run --yes
+```
+
+确认无误后执行部署：
+
+```bash
+agentcore deploy -y
+```
+
+`agentcore deploy` 命令会：
+- 读取 `agentcore/agentcore.json` 和 `agentcore/aws-targets.json` 配置
+- 基于本仓库的 `Dockerfile` 构建 ARM64 Docker 镜像并推送到 ECR
+- 使用 AWS CDK 合成并部署 CloudFormation 资源
+- 创建 AgentCore Runtime 并注入 `envVars` 中声明的环境变量
+
+使用 `-v` 查看详细的资源级部署事件。构建 + 推送 ECR + 创建 Runtime 大约需 5–10 分钟。
+
+部署完成后，查看部署状态并记录 Agent ARN：
+
+```bash
+agentcore status
+
+export AGENT_ARN="<输出中的 ARN>"
+```
+
+### 步骤 15：验证部署
+
+```bash
+# 获取 Bearer Token（用步骤 7 的测试 user client + user/pass）
+export BEARER_TOKEN=$(aws cognito-idp initiate-auth \
+  --client-id "${CLIENT_ID}" \
+  --auth-flow USER_PASSWORD_AUTH \
+  --auth-parameters USERNAME=${COGNITO_USERNAME},PASSWORD=${COGNITO_PASSWORD} \
+  --region ${AWS_REGION} | jq -r '.AuthenticationResult.AccessToken')
+
+ENCODED_ARN=$(echo -n ${AGENT_ARN} | jq -sRr '@uri')
+MCP_ENDPOINT="https://bedrock-agentcore.${AWS_REGION}.amazonaws.com/runtimes/${ENCODED_ARN}/invocations?qualifier=DEFAULT"
+
+# 发送 MCP initialize 请求
+curl -sS -X POST "${MCP_ENDPOINT}" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer ${BEARER_TOKEN}" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+```
+
+预期返回 
+```
+event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"experimental":{},"prompts":{"listChanged":true},"resources":{"subscribe":false,"listChanged":true},"tools":{"listChanged":true},"extensions":{"io.modelcontextprotocol/ui":{}}},"serverInfo":{"name":"AWS-API-MCP","version":"3.0.1"}}}
+```
+
+再用一个查本账号的 `call_aws` 请求验证执行链路：
+
+```bash
+curl -sS -X POST "${MCP_ENDPOINT}" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer ${BEARER_TOKEN}" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"call_aws","arguments":{"cli_command":"aws s3api list-buckets"}}}'
+```
+
+若第 6 节已配跨账号，再验证一次：
+
+```bash
+curl -sS -X POST "${MCP_ENDPOINT}" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer ${BEARER_TOKEN}" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"call_aws","arguments":{"cli_command":"aws s3api list-buckets","target_account_id":"<目标账号12位ID>"}}}'
+```
+
+> 注意：
+> - 必须先发 `initialize` 请求完成 MCP 协议握手，直接发 `tools/list` 会返回错误
+> - Token 有效期默认 1 小时，过期后重新执行获取 Token 的命令
+
+---
+
+## 8. 接入 Amazon Quick Suite Chat Agent
+
+### 步骤 16：构造端点 URL 和认证信息
+
+```bash
+ENCODED_ARN=$(echo -n ${AGENT_ARN} | jq -sRr '@uri')
+MCP_SERVER_ENDPOINT="https://bedrock-agentcore.${AWS_REGION}.amazonaws.com/runtimes/${ENCODED_ARN}/invocations"
+TOKEN_URL="https://${COGNITO_DOMAIN_PREFIX}.auth.${AWS_REGION}.amazoncognito.com/oauth2/token"
+
+echo "========================================="
+echo "Quick Suite Service Auth 所需信息："
+echo "========================================="
+echo "MCP Server 端点: ${MCP_SERVER_ENDPOINT}"
+echo "Client ID:       ${QS_M2M_CLIENT_ID}"
+echo "Client Secret:   ${QS_M2M_CLIENT_SECRET}"
+echo "Token URL:       ${TOKEN_URL}"
+echo "========================================="
+```
+
+### 步骤 17：在 Quick Suite 控制台创建 MCP Connector 集成
+
+1. 登录 [Amazon Quick Suite 控制台](https://quicksight.aws.amazon.com/)（需 Author Pro）
+2. 左侧导航栏 → **Connectors**
+3. 选择 **Create for your team** 标签页
+4. 找到并选择 **Model Context Protocol (MCP)**
+5. 在 Create Integration 页面填写：
+   - Name: 如 `AWS API MCP`
+   - Description（可选）: 集成用途描述
+   - MCP server endpoint: 步骤 16 输出的 `MCP_SERVER_ENDPOINT`
+6. 点击 "Next"
+7. 认证方式选择 **Service authentication**，填写：
+   - Client ID: `${QS_M2M_CLIENT_ID}`
+   - Client Secret: `${QS_M2M_CLIENT_SECRET}`
+   - Token URL: `${TOKEN_URL}`
+8. 点击 "Create and continue"
+9. 等待工具发现完成（约 1–2 分钟），确认能看到 `call_aws` / `suggest_aws_commands` 这 2 个 Actions
+10. 先不共享给其他用户，点击 "Publish"
+
+### 步骤 18：在 Chat Agent 中使用
+
+打开 Chat Agents，选择 "My Assistant" 或创建 Custom Chat Agent 并绑定 AWS API MCP，输入：
+
+```
+列出 us-east-1 所有运行中的 EC2 实例
+我账号下有哪些 S3 bucket？
+查询账号 111111111111 的 Lambda 函数列表       # 跨账号，需先完成第 6 节
+对比账号 111111111111 和 222222222222 的 RDS 实例  # LLM 会分两次 call_aws
+```
+
+> - 每次 MCP 操作有 60 秒超时限制（AgentCore 侧约束）。
+> - 写操作会弹出 Action Review；如果开启了 `READ_OPERATIONS_ONLY=true`，写操作会被服务端直接拒绝。
+> - 工具列表在首次注册后是静态的；如果以后在服务端增加新工具，需要删除并重新创建 Quick Suite 集成。
+
+---
+
+## 9. 日常运维
+
+```bash
+# 查看部署状态
+agentcore status
+
+# 流式查看 agent 运行日志
+agentcore logs
+
+# 也可以直接使用 AWS CLI 查看日志
+aws logs tail /aws/bedrock-agentcore/runtimes/<你的 agent-id>-DEFAULT \
+  --log-stream-name-prefix "$(date +%Y/%m/%d)/[runtime-logs]" \
+  --since 1h --region ${AWS_REGION}
+
+# 查看最近的 traces
+agentcore traces list
+
+# 修改源码后重新部署（AgentCore 会重新构建容器镜像）
+# 注：envVars 已在 agentcore.json 中持久化，无需每次重新指定
+rsync -av --exclude='.git' --exclude='.venv' \
+  ../aws-api-mcp-server-for-amazon-quick/ \
+  app/mcpserver/
+agentcore deploy -y
+
+# 完全清理：先移除所有资源配置，再部署以销毁 AWS 资源
+agentcore remove all
+agentcore deploy -y
+```
+
+---
+
+## 10. 故障排查
+
+| 现象 | 原因与解决 |
+|------|-----------|
+| Quick Suite "Creation failed"、只出现 `listTools` 失败 | AgentCore `allowedClients` 未包含 M2M Client ID。编辑 `agentcore/agentcore.json` 添加后重新 `agentcore deploy -y` |
+| Cognito 返回 `invalid_scope` | Resource Server 未创建或 scope 名不一致，核对步骤 9 与步骤 10 的 `aws-api-mcp/invoke` |
+| 容器启动即失败，日志 `AWS_REGION environment variable is not defined` | `agentcore.json` 的 `envVars` 中漏配 `AWS_REGION`，补上后重新部署 |
+| 容器内 MCP Server 只监听 127.0.0.1 | `envVars` 中忘了设 `AWS_API_MCP_HOST=0.0.0.0` |
+| 400 Bad Request `Invalid host / origin` | `AWS_API_MCP_ALLOWED_HOSTS` / `AWS_API_MCP_ALLOWED_ORIGINS` 没设 `*` |
+| 401 Unauthorized | Bearer Token 过期（1h），重新获取；或 AgentCore 的 `allowedClients` 没列该 client_id |
+| 所有请求都 401 / auth 报错，且确认 Token 正确 | 很可能误把 `AUTH_TYPE` 设成了 `oauth`。改回 `no-auth` 并重新 `agentcore deploy -y` |
+| 403 AccessDenied（call_aws 执行时） | 执行角色缺对应 AWS API 权限；或启用了 `READ_OPERATIONS_ONLY` 而命令是写操作 |
+| 跨账号调用报 `Failed to assume role ...` | 目标账号未创建 `AwsApiMcpCrossAccountRole`，或信任策略不允许源执行角色，或源角色没有 `sts:AssumeRole` 权限 |
+| curl 测试返回 400 / 406 | `Accept` header 必须同时带 `application/json, text/event-stream` |
+| `agentcore invoke` 返回 400 | 正常：该命令跳过了 MCP `initialize` 握手。用 `curl` 先发 `initialize` 验证 |
+| AgentCore 部署后修改未生效 | 需要重新将源码 rsync 到 `app/mcpserver/` 并执行 `agentcore deploy -y` 重新构建镜像 |
+| `ModuleNotFoundError: awslabs.aws_api_mcp_server` | 容器内依赖安装不完整；检查 Dockerfile 层（`uv sync --no-editable` 必须成功）或 `uv-requirements.txt` 是否覆盖全部依赖 |
+
+---
+
+## 11. 参考文档
+
+- [aws-api-mcp-server 上游源码](https://github.com/awslabs/mcp/tree/main/src/aws-api-mcp-server)
+- [跨账号查询方案](./cross-account-support.md)
+- [FastMCP 文档](https://github.com/jlowin/fastmcp)
+- [AgentCore CLI GitHub](https://github.com/aws/agentcore-cli)
+- [Get started with the AgentCore CLI](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-get-started-cli.html)
+- [Deploy MCP servers in AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-mcp.html)
+- [MCP protocol contract](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-mcp-protocol-contract.html)
+- [IAM Permissions for AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-permissions.html)
+- [Authenticate and authorize with Inbound Auth and Outbound Auth](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-oauth.html)
+- [Amazon Cognito as identity provider](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/identity-idp-cognito.html)
+- [Amazon Quick Suite MCP integration](https://docs.aws.amazon.com/quick/latest/userguide/mcp-integration.html)
