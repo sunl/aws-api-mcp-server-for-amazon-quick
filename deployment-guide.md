@@ -98,6 +98,17 @@ npm install -g @aws/agentcore
 agentcore --help
 ```
 
+设置后续步骤需要的环境变量：
+
+```bash
+# 验证 AWS 凭证是否已正确配置
+aws sts get-caller-identity
+
+export AWS_REGION=us-east-1
+export AWS_DEFAULT_REGION=us-east-1
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+```
+
 ---
 
 ## 2.5 重要限制与安全声明（务必先读）
@@ -171,16 +182,7 @@ data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabili
 
 ## 4. 配置 IAM 执行角色
 
-本节创建 AgentCore 容器运行时使用的执行角色。**跨账号查询的额外配置请在第 6 节处理**。先设置后续步骤需要的环境变量：
-
-```bash
-# 验证 AWS 凭证是否已正确配置
-aws sts get-caller-identity
-
-export AWS_REGION=us-east-1
-export AWS_DEFAULT_REGION=us-east-1
-export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-```
+本节创建 AgentCore 容器运行时使用的执行角色。**跨账号查询的额外配置请在第 6 节处理**。
 
 ### 步骤 4：创建信任策略和角色
 
